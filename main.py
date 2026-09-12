@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-YouTube Video & Playlist Downloader — entry point.
+Media Downloader — CLI entry point (any site yt-dlp supports).
 
 Interactive usage:
     python main.py            (Linux/macOS: python3 main.py)
@@ -9,7 +9,8 @@ Non-interactive usage:
     python main.py --url "https://www.youtube.com/watch?v=..." \\
         --quality 1080p --output "./downloads" --name original
 
-See README.md for the full list of options and examples.
+See README.md for the full list of options and examples, and
+webmain.py for the browser UI.
 """
 
 import sys

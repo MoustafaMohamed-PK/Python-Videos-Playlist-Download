@@ -1,5 +1,5 @@
 """
-Configuration management for the YouTube Downloader.
+Configuration management for the Media Downloader.
 
 Responsible for:
     - Providing sane default settings
