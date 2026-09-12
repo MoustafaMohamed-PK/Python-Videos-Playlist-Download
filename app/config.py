@@ -38,6 +38,7 @@ class AppConfig:
     existing_file_behavior: str = "skip"  # skip | overwrite | ask
     concurrency: int = 3  # playlist items downloaded in parallel
     concurrent_fragments: int = 4  # yt-dlp's own DASH/HLS fragment parallelism, per item
+    web_download_root: str = ""  # base directory the web UI is confined to (see app/paths.py)
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)

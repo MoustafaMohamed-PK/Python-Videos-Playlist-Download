@@ -18,6 +18,7 @@ These let app.service (and anything built on it) be tested end-to-end
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -75,6 +76,7 @@ class FakeDownloader:
         prefer_mp4: bool = True,
         concurrent_fragments: int = 4,
         cancel_event=None,
+        delay: float = 0.0,
     ):
         self.destination = destination
         self.quality = quality
@@ -86,6 +88,10 @@ class FakeDownloader:
         self.prefer_mp4 = prefer_mp4
         self.concurrent_fragments = concurrent_fragments
         self.cancel_event = cancel_event
+        # Artificial per-item delay, purely for tests that need to
+        # observe an in-progress state (job manager cancellation,
+        # snapshot polling) instead of a job that finishes instantly.
+        self.delay = delay
 
     def download_many(
         self,
@@ -98,6 +104,9 @@ class FakeDownloader:
         run_result = DownloadRunResult(destination=self.destination)
 
         for i, (url, meta) in enumerate(zip(video_urls, metadatas), start=1):
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                break
+
             title = meta.get("title") or "Untitled"
             if not url:
                 run_result.results.append(
@@ -120,6 +129,9 @@ class FakeDownloader:
                         quality_label=self.quality.label,
                     )
                 )
+
+            if self.delay:
+                time.sleep(self.delay)
 
             ext = "mp3" if self.quality.is_audio_only else "mp4"
             output_path = self.destination / f"{title}.{ext}"

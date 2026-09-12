@@ -165,8 +165,10 @@ def analyze(
 ) -> AnalyzeResult:
     """Validate ``url`` and fetch everything needed to plan a download.
 
-    Raises a :class:`DownloadAppError` subclass (including
-    :class:`app.sites.UnsupportedSiteError`) on failure.
+    Raises :class:`app.validators.ValidationError` (including its
+    subclass :class:`app.sites.UnsupportedSiteError`) if ``url`` is
+    malformed or unsupported, or a :class:`DownloadAppError` subclass
+    if extraction itself fails. Callers must catch both.
     """
     validated_url = validate_media_url(url)
     target = extractor(validated_url)

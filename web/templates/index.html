@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media Downloader</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Media Downloader</h1>
+    <p class="subtitle">Paste a link from any site yt-dlp supports.</p>
+  </header>
+
+  <main>
+    <section class="card" id="analyze-card">
+      <form id="analyze-form">
+        <label for="url-input">Video or playlist URL</label>
+        <div class="row">
+          <input id="url-input" type="url" placeholder="https://…" required autocomplete="off">
+          <button type="submit" id="analyze-btn">Analyze</button>
+        </div>
+      </form>
+      <p class="error" id="analyze-error" hidden></p>
+    </section>
+
+    <section class="card" id="configure-card" hidden>
+      <div class="preview">
+        <img id="preview-thumb" alt="" hidden>
+        <div class="preview-info">
+          <h2 id="preview-title"></h2>
+          <p class="meta">
+            <span id="preview-site" class="badge"></span>
+            <span id="preview-count"></span>
+            <span id="preview-duration"></span>
+          </p>
+          <p class="warning" id="preview-warning" hidden></p>
+        </div>
+      </div>
+
+      <form id="job-form">
+        <div class="field">
+          <label for="quality-select">Quality</label>
+          <select id="quality-select"></select>
+        </div>
+        <div class="field">
+          <label for="naming-select">File naming</label>
+          <select id="naming-select">
+            <option value="original">Original title</option>
+            <option value="numbered">Sequential numbering</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="subfolder-input">Subfolder (optional)</label>
+          <input id="subfolder-input" type="text" placeholder="e.g. music/2026" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="concurrency-input">Playlist items in parallel</label>
+          <input id="concurrency-input" type="number" min="1" max="8" value="3">
+        </div>
+        <button type="submit" id="start-btn">Start download</button>
+      </form>
+      <p class="error" id="job-error" hidden></p>
+    </section>
+
+    <section class="card" id="jobs-card">
+      <h2>Jobs</h2>
+      <div id="jobs-list" class="jobs-list">
+        <p class="empty" id="jobs-empty">No downloads yet.</p>
+      </div>
+    </section>
+  </main>
+
+  <template id="job-card-template">
+    <article class="job">
+      <header class="job-header">
+        <span class="job-title"></span>
+        <span class="job-state badge"></span>
+      </header>
+      <div class="job-bar-track">
+        <div class="job-bar-fill"></div>
+      </div>
+      <p class="job-stats"></p>
+      <p class="job-error error" hidden></p>
+      <ul class="job-files"></ul>
+      <button class="job-cancel" type="button">Cancel</button>
+    </article>
+  </template>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

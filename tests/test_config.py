@@ -29,6 +29,10 @@ class TestAppConfigDefaults(unittest.TestCase):
         self.assertEqual(config.quality, "720p")
         self.assertFalse(hasattr(config, "unexpected_key"))
 
+    def test_web_download_root_defaults_empty(self):
+        config = AppConfig()
+        self.assertEqual(config.web_download_root, "")
+
     def test_concurrency_defaults(self):
         config = AppConfig()
         self.assertEqual(config.concurrency, 3)

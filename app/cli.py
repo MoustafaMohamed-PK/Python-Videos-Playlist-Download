@@ -328,7 +328,7 @@ def run_download_workflow(
     if analysis is None:
         try:
             analysis = analyze(url)
-        except DownloadAppError as exc:
+        except (DownloadAppError, ValidationError) as exc:
             print(f"\nERROR:\n{exc}")
             logger.error("Analysis failed for %s: %s", url, exc)
             return 1
@@ -403,7 +403,7 @@ def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
     logger = setup_logging()
     try:
         analysis = analyze(url)
-    except DownloadAppError as exc:
+    except (DownloadAppError, ValidationError) as exc:
         print(f"\nERROR:\n{exc}")
         logger.error("Analysis failed for %s: %s", url, exc)
         return 1

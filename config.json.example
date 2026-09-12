@@ -5,5 +5,6 @@
   "filename_pattern": "{title}",
   "existing_file_behavior": "skip",
   "concurrency": 3,
-  "concurrent_fragments": 4
+  "concurrent_fragments": 4,
+  "web_download_root": ""
 }
