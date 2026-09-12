@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from app.filename import (
     FilenameError,
     build_filename,
     dedupe_path,
+    existing_outputs,
     sanitize_filename,
     validate_pattern,
 )
@@ -127,6 +129,38 @@ class TestDedupePath(unittest.TestCase):
             self.assertEqual(result.name, "ytdl_test_dupe (2).mp4")
         finally:
             base.unlink(missing_ok=True)
+
+
+class TestExistingOutputs(unittest.TestCase):
+    def test_finds_non_mp4_container(self):
+        # The whole point: a webm-only site's output must still be
+        # recognized as "already downloaded", not just a hardcoded .mp4.
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            (destination / "My Video.webm").touch()
+            found = existing_outputs(destination, "My Video")
+            self.assertEqual([p.name for p in found], ["My Video.webm"])
+
+    def test_ignores_sidecar_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            (destination / "My Video.mp4.part").touch()
+            (destination / "My Video.info.json").touch()
+            (destination / "My Video.jpg").touch()
+            found = existing_outputs(destination, "My Video")
+            self.assertEqual(found, [])
+
+    def test_no_match_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            found = existing_outputs(Path(tmp), "Nothing Here")
+            self.assertEqual(found, [])
+
+    def test_glob_special_characters_in_stem_are_escaped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            (destination / "Video [Official].mp4").touch()
+            found = existing_outputs(destination, "Video [Official]")
+            self.assertEqual([p.name for p in found], ["Video [Official].mp4"])
 
 
 if __name__ == "__main__":

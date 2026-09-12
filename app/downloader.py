@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import yt_dlp
 
-from app.filename import build_filename, dedupe_path
+from app.filename import build_filename, dedupe_path, existing_outputs
 from app.formats import QualityChoice, build_format_selector
 from app.utils import ffmpeg_available
 
@@ -320,6 +320,7 @@ class Downloader:
         existing_file_behavior: str = "skip",
         progress_callback: Optional[ProgressCallback] = None,
         ask_overwrite_callback: Optional[Callable[[str], str]] = None,
+        prefer_mp4: bool = True,
     ):
         self.destination = destination
         self.quality = quality
@@ -328,6 +329,14 @@ class Downloader:
         self.existing_file_behavior = existing_file_behavior
         self.progress_callback = progress_callback
         self.ask_overwrite_callback = ask_overwrite_callback
+        # Whether forcing a remux to .mp4 makes sense for what's being
+        # downloaded. Callers with real formats up front (a single
+        # video) should pass formats_support_mp4(formats); a webm/vp9
+        # -only site shouldn't have mp4 forced on it. Defaults to True
+        # (today's YouTube-shaped assumption) when the caller doesn't
+        # know in advance (e.g. a playlist, whose per-item formats
+        # aren't resolved until download time).
+        self.prefer_mp4 = prefer_mp4
 
         if not self.quality.is_audio_only and not ffmpeg_available():
             # We don't hard-fail here because many single-quality
@@ -337,15 +346,13 @@ class Downloader:
             # that via classify_ytdlp_error. We just warn upfront.
             logger.info("FFmpeg not found on PATH -- merges will fail if needed.")
 
-    def _video_index_to_target_path(self, index: int, metadata: Dict[str, Any]) -> Path:
-        name = build_filename(
+    def _video_index_to_stem(self, index: int, metadata: Dict[str, Any]) -> str:
+        return build_filename(
             mode=self.filename_mode,
             index=index,
             metadata=metadata,
             pattern=self.filename_pattern,
         )
-        ext = "mp3" if self.quality.is_audio_only else "mp4"
-        return self.destination / f"{name}.{ext}"
 
     def _make_progress_hook(self, video_index: int, video_total: int, title: str):
         def hook(d: Dict[str, Any]) -> None:
@@ -381,8 +388,8 @@ class Downloader:
 
         return hook
 
-    def _build_ydl_opts(self, target_path: Path, video_index: int, video_total: int, title: str) -> Dict[str, Any]:
-        outtmpl = str(target_path.with_suffix("")) + ".%(ext)s"
+    def _build_ydl_opts(self, stem_path: Path, video_index: int, video_total: int, title: str) -> Dict[str, Any]:
+        outtmpl = f"{stem_path}.%(ext)s"
 
         opts: Dict[str, Any] = {
             "format": build_format_selector(self.quality),
@@ -396,7 +403,11 @@ class Downloader:
             "fragment_retries": 5,
             "progress_hooks": [self._make_progress_hook(video_index, video_total, title)],
             "noplaylist": True,  # we drive playlist iteration ourselves
-            "merge_output_format": "mp4",
+            # A preference list, not a hard requirement (yt-dlp picks the
+            # first one whose codecs actually fit -- see
+            # get_compatible_ext): falls back to mkv rather than forcing
+            # an incompatible mp4 mux when the codecs don't fit it.
+            "merge_output_format": "mp4/mkv",
         }
 
         if self.quality.is_audio_only:
@@ -407,8 +418,11 @@ class Downloader:
                     "preferredquality": "192",
                 }
             ]
-        else:
-            # Ensure final container is mp4 when a merge (or remux) happens.
+        elif self.prefer_mp4:
+            # Force a remux to mp4 only when the site's codecs are known
+            # to fit it -- this is a no-op stream-copy if the merge/
+            # download already produced mp4, but on a webm/vp9-only site
+            # it would otherwise force a lossy or failing conversion.
             opts["postprocessors"] = [
                 {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
             ]
@@ -430,28 +444,38 @@ class Downloader:
                 error="This site did not provide a direct link for this item.",
             )
 
-        target_path = self._video_index_to_target_path(index, metadata)
+        stem = self._video_index_to_stem(index, metadata)
+        stem_path = self.destination / stem
 
-        if target_path.exists():
+        existing = existing_outputs(self.destination, stem)
+        if existing:
             behavior = self.existing_file_behavior
             if behavior == "ask" and self.ask_overwrite_callback:
-                behavior = self.ask_overwrite_callback(str(target_path))
+                behavior = self.ask_overwrite_callback(str(existing[0]))
             if behavior == "skip":
-                logger.info("Skipping existing file: %s", target_path)
-                return VideoResult(index=index, title=title, success=True, skipped=True, output_path=target_path)
+                logger.info("Skipping existing file: %s", existing[0])
+                return VideoResult(index=index, title=title, success=True, skipped=True, output_path=existing[0])
             if behavior == "overwrite":
-                try:
-                    target_path.unlink()
-                except OSError:
-                    pass
+                for path in existing:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
             # "overwrite" falls through to a normal download below.
             # Any other behavior value also falls through defensively.
 
-        ydl_opts = self._build_ydl_opts(target_path, index, video_total, title)
+        ydl_opts = self._build_ydl_opts(stem_path, index, video_total, title)
+
+        # The real output extension depends on the site's actual codecs
+        # (mp4, webm, mkv, mp3, ...) -- post_hooks fires with the final
+        # path after all postprocessing, so this is the authoritative
+        # way to learn it rather than assuming .mp4/.mp3.
+        captured_paths: List[Path] = []
+        ydl_opts["post_hooks"] = [lambda path: captured_paths.append(Path(path))]
 
         logger.info(
             "Starting download | url=%s | quality=%s | destination=%s | filename=%s",
-            url, self.quality.label, self.destination, target_path.name,
+            url, self.quality.label, self.destination, stem,
         )
 
         try:
@@ -466,8 +490,9 @@ class Downloader:
             logger.error("Download failed (OS error) | url=%s | reason=%s", url, friendly)
             return VideoResult(index=index, title=title, success=False, error=str(friendly))
 
-        logger.info("Download succeeded | url=%s | file=%s", url, target_path.name)
-        return VideoResult(index=index, title=title, success=True, output_path=target_path)
+        output_path = captured_paths[-1] if captured_paths else stem_path
+        logger.info("Download succeeded | url=%s | file=%s", url, output_path.name)
+        return VideoResult(index=index, title=title, success=True, output_path=output_path)
 
     def download_many(
         self,

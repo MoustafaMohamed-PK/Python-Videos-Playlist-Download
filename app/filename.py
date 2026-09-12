@@ -18,8 +18,10 @@ Supported placeholders for custom patterns:
 
 from __future__ import annotations
 
+import glob as _glob
 import re
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # Windows reserved device names (case-insensitive), which are invalid as a
 # filename (with or without an extension) on Windows.
@@ -141,6 +143,33 @@ def build_filename(
         return sanitize_filename(rendered, fallback=f"video_{index}")
 
     raise FilenameError(f"Unknown filename mode: {mode}")
+
+
+# Container extensions yt-dlp might produce for finished media output --
+# used by existing_outputs() to recognize "this item was already
+# downloaded" without assuming a fixed .mp4/.mp3 extension (some sites
+# only offer webm/mkv/opus, etc). Deliberately excludes sidecar files
+# yt-dlp can also write (.part, .ytdl, .info.json, .description,
+# thumbnails) so those don't get mistaken for a finished download.
+_MEDIA_EXTENSIONS = {
+    "mp4", "mkv", "webm", "mov", "avi", "flv", "m4v",
+    "mp3", "m4a", "opus", "ogg", "aac", "flac", "wav", "wma",
+}
+
+
+def existing_outputs(destination: Path, stem: str) -> List[Path]:
+    """Find already-downloaded media file(s) for ``stem`` in ``destination``.
+
+    Used instead of checking for a single hardcoded extension (e.g.
+    always ``.mp4``), since the real output container depends on what
+    the site actually offers and how it got merged/remuxed.
+    """
+    pattern = _glob.escape(stem) + ".*"
+    return [
+        path
+        for path in sorted(destination.glob(pattern))
+        if path.is_file() and path.suffix.lower().lstrip(".") in _MEDIA_EXTENSIONS
+    ]
 
 
 def dedupe_path(path):

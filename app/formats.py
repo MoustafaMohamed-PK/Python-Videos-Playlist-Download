@@ -8,15 +8,23 @@ Responsible for:
     - Reporting which qualities are actually available for a given video,
       so the CLI can tell the user honestly rather than silently
       substituting a different quality.
+    - Building a quality menu from a site's *actual* formats, since
+      non-YouTube sites rarely offer the same fixed resolution ladder
+      (Vimeo may top out at 540p, a single-format site may report no
+      height at all, an audio site like SoundCloud has no video).
+    - Deciding whether a site's formats are safe to force into an .mp4
+      container (see :func:`formats_support_mp4`).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-# Ordered from highest to lowest so we can present a sensible menu and
-# also do "closest available" reporting.
+# Ordered from highest to lowest. Used as the playlist-download ladder
+# (formats aren't known upfront there -- see app/downloader.py) and as
+# the fallback menu when a site's real formats can't be determined.
 QUALITY_LADDER = [
     ("best", "Best available"),
     ("2160p", "2160p (4K)"),
@@ -37,10 +45,12 @@ _HEIGHT_BY_LABEL = {
     "360p": 360,
 }
 
+_HEIGHT_LABEL_RE = re.compile(r"^(\d+)p$")
+
 
 @dataclass
 class QualityChoice:
-    label: str  # e.g. "1080p", "best", "audio"
+    label: str  # e.g. "1080p", "540p", "best", "audio"
 
     @property
     def is_audio_only(self) -> bool:
@@ -52,7 +62,21 @@ class QualityChoice:
 
     @property
     def height(self) -> Optional[int]:
-        return _HEIGHT_BY_LABEL.get(self.label)
+        # Parsed from the label itself (any "<N>p") rather than looked
+        # up in a fixed table, so heights outside the YouTube-shaped
+        # ladder -- 540p, 240p, whatever a given site actually offers --
+        # work the same way as the ones on QUALITY_LADDER.
+        match = _HEIGHT_LABEL_RE.match(self.label)
+        return int(match.group(1)) if match else None
+
+
+@dataclass(frozen=True)
+class QualityOption:
+    """One entry in a quality menu built from a video's real formats."""
+
+    key: str  # e.g. "best", "1080p", "540p", "audio" -- usable as a QualityChoice.label
+    label: str  # display text
+    height: Optional[int]
 
 
 def build_format_selector(choice: QualityChoice) -> str:
@@ -158,6 +182,77 @@ def quality_is_available(choice: QualityChoice, formats: List[Dict[str, Any]]) -
     if choice.is_best:
         return True
     if choice.is_audio_only:
-        return has_audio_only(formats)
+        # Lenient beyond has_audio_only(): a site that reports no video
+        # heights at all (e.g. an audio-only extractor whose formats
+        # don't set vcodec == "none" the way YouTube's do) still counts
+        # as "audio available" -- there's nothing else it could be.
+        return has_audio_only(formats) or not available_heights(formats)
     heights = available_heights(formats)
     return choice.height in heights
+
+
+def build_quality_menu(formats: List[Dict[str, Any]]) -> List[QualityOption]:
+    """Build a quality menu from a video's *actual* formats.
+
+    Unlike the fixed :data:`QUALITY_LADDER` (which assumes YouTube's
+    standard resolution set), this reflects whatever the site really
+    offers: an odd height like 540p, no height at all (a single muxed
+    format), or audio-only content. Always includes "best" when any
+    format exists.
+    """
+    if not formats:
+        return [QualityOption(key="best", label="Best available", height=None)]
+
+    heights = available_heights(formats)
+    audio_only = has_audio_only(formats)
+
+    if not heights:
+        # No video heights at all: either this is a pure-audio site
+        # (SoundCloud) -- offer only "audio" -- or a site with a single
+        # muxed format lacking height metadata, where "best" is the
+        # only meaningful choice.
+        if audio_only:
+            return [QualityOption(key="audio", label="Audio only", height=None)]
+        return [QualityOption(key="best", label="Best available", height=None)]
+
+    options = [QualityOption(key="best", label="Best available", height=None)]
+    for height in heights:
+        options.append(QualityOption(key=f"{height}p", label=f"{height}p", height=height))
+    if audio_only:
+        options.append(QualityOption(key="audio", label="Audio only", height=None))
+    return options
+
+
+# Codec name prefixes yt-dlp itself considers safe to mux into an .mp4
+# container (mirrors yt_dlp.utils.get_compatible_ext's COMPATIBLE_CODECS
+# for 'mp4') -- used to decide whether forcing a remux to .mp4 makes
+# sense for a given site's formats, rather than assuming every site's
+# output is as mp4-friendly as YouTube's.
+_MP4_COMPATIBLE_CODECS = {
+    "av1", "hevc", "avc1", "mp4a", "ac-4", "h264", "aacl", "ec-3",
+}
+
+
+def _codec_family(codec: Optional[str]) -> Optional[str]:
+    if not codec or codec == "none":
+        return None
+    # Mirrors yt-dlp's own sanitize_codec: take the part before the
+    # first ".", drop any "0" characters (so "vp09" -> "vp9"), lowercase.
+    return codec.split(".")[0].replace("0", "").lower()
+
+
+def formats_support_mp4(formats: List[Dict[str, Any]]) -> bool:
+    """Whether any of ``formats`` use a codec yt-dlp will happily mux into mp4.
+
+    Used to decide whether the ``FFmpegVideoRemuxer`` postprocessor (a
+    forced stream-copy to .mp4) is worth attaching. On a webm/vp9/opus
+    -only site, forcing a remux to mp4 can fail or corrupt the output;
+    skipping it there and letting ``merge_output_format`` pick a
+    container that actually fits the codecs is the safer default.
+    """
+    for fmt in formats:
+        if _codec_family(fmt.get("vcodec")) in _MP4_COMPATIBLE_CODECS:
+            return True
+        if _codec_family(fmt.get("acodec")) in _MP4_COMPATIBLE_CODECS:
+            return True
+    return False

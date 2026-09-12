@@ -28,7 +28,9 @@ from app.filename import FilenameError, validate_pattern
 from app.formats import (
     QUALITY_LADDER,
     QualityChoice,
-    describe_available_qualities,
+    QualityOption,
+    build_quality_menu,
+    formats_support_mp4,
     quality_is_available,
 )
 from app.prompts import prompt_choice, prompt_int_in_range, prompt_yes_no
@@ -62,8 +64,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--url", help="Video or playlist URL (any site yt-dlp supports).")
     parser.add_argument(
         "--quality",
-        choices=[label for label, _ in QUALITY_LADDER],
-        help="Desired quality (e.g. 1080p, 720p, best, audio).",
+        help=(
+            "Desired quality: 'best', 'audio', or a resolution like "
+            "1080p/720p/540p -- whatever the site actually offers "
+            "(not limited to a fixed list, since sites vary)."
+        ),
     )
     parser.add_argument("--output", help="Destination folder.")
     parser.add_argument(
@@ -115,13 +120,20 @@ def prompt_url() -> str:
             print(f"  {exc}")
 
 
-def prompt_quality(available_formats: Optional[list] = None) -> QualityChoice:
+def prompt_quality(menu: List[QualityOption]) -> QualityChoice:
+    """Prompt from a menu built from the target's *actual* formats.
+
+    ``menu`` comes from :func:`app.formats.build_quality_menu` for a
+    single video (reflecting exactly what the site offers) or from the
+    fixed :data:`QUALITY_LADDER` for a playlist (formats aren't known
+    upfront there) -- either way, only options the caller has already
+    decided are meaningful are shown.
+    """
     print("\nAvailable qualities:")
-    for i, (_, display) in enumerate(QUALITY_LADDER, start=1):
-        print(f"{i}. {display}")
-    choice = prompt_int_in_range("Choose quality: ", 1, len(QUALITY_LADDER))
-    label = QUALITY_LADDER[choice - 1][0]
-    return QualityChoice(label=label)
+    for i, option in enumerate(menu, start=1):
+        print(f"{i}. {option.label}")
+    choice = prompt_int_in_range("Choose quality: ", 1, len(menu))
+    return QualityChoice(label=menu[choice - 1].key)
 
 
 def prompt_filename_mode() -> tuple[str, Optional[str]]:
@@ -263,36 +275,47 @@ def run_download_workflow(
     filename_pattern: Optional[str],
     existing_file_behavior: str,
     interactive: bool,
+    target: Optional[ExtractedTarget] = None,
 ) -> int:
     """Runs the full extract -> confirm -> download -> summarize workflow.
+
+    ``target`` lets a caller that already extracted metadata (the
+    interactive flow, to build a quality menu before this is called)
+    pass it through instead of paying for a second extraction.
 
     Returns a process exit code (0 = success, non-zero = error).
     """
     logger = setup_logging()
 
-    try:
-        target: ExtractedTarget = extract_target(url)
-    except DownloadAppError as exc:
-        print(f"\nERROR:\n{exc}")
-        logger.error("Extraction failed for %s: %s", url, exc)
-        return 1
+    if target is None:
+        try:
+            target = extract_target(url)
+        except DownloadAppError as exc:
+            print(f"\nERROR:\n{exc}")
+            logger.error("Extraction failed for %s: %s", url, exc)
+            return 1
 
     quality = QualityChoice(label=quality_label)
+
+    # Whether forcing a remux to mp4 makes sense. Known up front for a
+    # single video (real formats are available); for a playlist,
+    # per-item formats aren't resolved until download time, so keep
+    # today's YouTube-shaped default.
+    prefer_mp4 = True
 
     # For a single video we already have real formats from extraction;
     # validate the requested quality against them so we never silently
     # substitute a different one.
     if not target.is_playlist:
         formats = target.formats or fetch_formats_for_video(url)
+        prefer_mp4 = formats_support_mp4(formats)
         if not quality_is_available(quality, formats):
-            available = describe_available_qualities(formats)
+            menu = build_quality_menu(formats)
             print("\nERROR:")
             print(f"The selected {quality_label} quality is not available for this video.")
-            if available:
-                print("\nAvailable:")
-                for label in available:
-                    display = dict(QUALITY_LADDER).get(label, label)
-                    print(f"  {display}")
+            print("\nAvailable:")
+            for option in menu:
+                print(f"  {option.label}")
             return 1
 
     if not quality.is_audio_only and not ffmpeg_available():
@@ -330,6 +353,7 @@ def run_download_workflow(
         existing_file_behavior=existing_file_behavior,
         progress_callback=make_progress_printer(),
         ask_overwrite_callback=interactive_ask_overwrite if interactive else None,
+        prefer_mp4=prefer_mp4,
     )
 
     video_urls = _video_urls_for_target(url, target)
@@ -380,11 +404,40 @@ def _video_urls_for_target(original_url: str, target: ExtractedTarget) -> List[O
 # Entry points
 # --------------------------------------------------------------------------
 
+def _ladder_menu() -> List[QualityOption]:
+    """The fixed QUALITY_LADDER rendered as a QualityOption menu.
+
+    Used for playlists, where formats aren't known upfront (yt-dlp's
+    flat playlist extraction doesn't resolve each entry's formats) --
+    unlike a single video, there's no real format list to build a menu
+    from yet, so this is the best available approximation up front.
+    """
+    return [
+        QualityOption(key=label, label=display, height=QualityChoice(label=label).height)
+        for label, display in QUALITY_LADDER
+    ]
+
+
 def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
     print_header(APP_TITLE)
 
     url = prompt_url()
-    quality = prompt_quality()
+
+    logger = setup_logging()
+    try:
+        target = extract_target(url)
+    except DownloadAppError as exc:
+        print(f"\nERROR:\n{exc}")
+        logger.error("Extraction failed for %s: %s", url, exc)
+        return 1
+
+    if target.is_playlist:
+        menu = _ladder_menu()
+    else:
+        formats = target.formats or fetch_formats_for_video(url)
+        menu = build_quality_menu(formats)
+
+    quality = prompt_quality(menu)
     filename_mode, filename_pattern = prompt_filename_mode()
     destination = prompt_destination_folder(default=config.download_folder or None)
     existing_behavior = prompt_existing_file_behavior(default=config.existing_file_behavior)
@@ -405,6 +458,7 @@ def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
         filename_pattern=filename_pattern,
         existing_file_behavior=existing_behavior,
         interactive=True,
+        target=target,
     )
 
 
