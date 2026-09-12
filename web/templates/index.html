@@ -99,24 +99,29 @@
 
   <template id="job-card-template">
     <article class="job">
-      <header class="job-header">
-        <span class="job-title"></span>
-        <span class="job-state badge"></span>
-      </header>
-      <div class="job-bar-track">
-        <div class="job-bar-fill"></div>
-      </div>
-      <p class="job-stats"></p>
-      <p class="job-error error" hidden></p>
-      <div class="job-conflict" hidden>
-        <p class="job-conflict-text"></p>
-        <div class="row">
-          <button type="button" class="job-conflict-skip">Skip</button>
-          <button type="button" class="job-conflict-overwrite">Overwrite</button>
+      <div class="job-body">
+        <img class="job-thumb" alt="" hidden>
+        <div class="job-main">
+          <header class="job-header">
+            <span class="job-title"></span>
+            <span class="job-state badge"></span>
+          </header>
+          <div class="job-bar-track">
+            <div class="job-bar-fill"></div>
+          </div>
+          <p class="job-stats"></p>
+          <p class="job-error error" hidden></p>
+          <div class="job-conflict" hidden>
+            <p class="job-conflict-text"></p>
+            <div class="row">
+              <button type="button" class="job-conflict-skip">Skip</button>
+              <button type="button" class="job-conflict-overwrite">Overwrite</button>
+            </div>
+          </div>
+          <ul class="job-files"></ul>
+          <button class="job-cancel" type="button">Cancel</button>
         </div>
       </div>
-      <ul class="job-files"></ul>
-      <button class="job-cancel" type="button">Cancel</button>
     </article>
   </template>
 

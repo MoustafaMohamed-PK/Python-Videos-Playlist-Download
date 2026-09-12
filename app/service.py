@@ -78,6 +78,7 @@ class AnalyzeResult:
     formats: List[Dict[str, Any]]  # only populated for a single video
     quality_menu: List[QualityOption]
     video_urls: List[Optional[str]]  # resolved per-item download URLs
+    thumbnail: Optional[str] = None  # first video's thumbnail URL, if yt-dlp reported one
     warnings: List[str] = field(default_factory=list)
 
 
@@ -111,6 +112,7 @@ class RunPlan:
     video_count: int
     concurrency: int
     concurrent_fragments: int
+    thumbnail: Optional[str] = None
 
 
 def _ladder_menu() -> List[QualityOption]:
@@ -187,6 +189,10 @@ def analyze(
     else:
         title = target.videos[0].title if target.videos else "Untitled"
 
+    thumbnail = None
+    if target.videos:
+        thumbnail = (target.videos[0].raw or {}).get("thumbnail")
+
     return AnalyzeResult(
         url=validated_url,
         is_playlist=target.is_playlist,
@@ -196,6 +202,7 @@ def analyze(
         formats=formats,
         quality_menu=quality_menu,
         video_urls=video_urls,
+        thumbnail=thumbnail,
     )
 
 
@@ -253,6 +260,7 @@ def plan(request: DownloadRequest, analysis: AnalyzeResult) -> RunPlan:
         video_count=len(analysis.videos),
         concurrency=concurrency,
         concurrent_fragments=max(1, min(8, request.concurrent_fragments)),
+        thumbnail=analysis.thumbnail,
     )
 
 

@@ -92,10 +92,6 @@ def api_analyze():
     _job_manager().cache_analysis(url, analysis)
 
     site = match_extractor(analysis.url)
-    thumbnail = None
-    if analysis.videos:
-        raw = analysis.videos[0].raw or {}
-        thumbnail = raw.get("thumbnail")
     duration = analysis.videos[0].duration if (not analysis.is_playlist and analysis.videos) else None
 
     return jsonify(
@@ -105,7 +101,7 @@ def api_analyze():
             "is_playlist": analysis.is_playlist,
             "item_count": len(analysis.videos),
             "site": site.display_name or site.extractor,
-            "thumbnail": thumbnail,
+            "thumbnail": analysis.thumbnail,
             "duration": duration,
             "qualities": [{"key": o.key, "label": o.label} for o in analysis.quality_menu],
             "warnings": analysis.warnings,

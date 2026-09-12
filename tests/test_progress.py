@@ -8,7 +8,7 @@ from app.downloader import ProgressEvent
 from app.progress import ProgressAggregator
 
 
-def _event(index, status, downloaded=0, total=100, speed=None, title="Item"):
+def _event(index, status, downloaded=0, total=100, speed=None, eta=None, title="Item"):
     return ProgressEvent(
         status=status,
         video_index=index,
@@ -17,7 +17,7 @@ def _event(index, status, downloaded=0, total=100, speed=None, title="Item"):
         downloaded_bytes=downloaded,
         total_bytes=total,
         speed=speed,
-        eta=None,
+        eta=eta,
         quality_label="best",
     )
 
@@ -67,6 +67,35 @@ class TestProgressAggregator(unittest.TestCase):
         agg.update(_event(1, "downloading", downloaded=90, total=100))
         # The earlier snapshot must not have mutated in place.
         self.assertEqual(first.items[1].fraction, 0.1)
+
+    def test_downloaded_bytes_sums_across_items(self):
+        agg = ProgressAggregator(total=2)
+        agg.update(_event(1, "downloading", downloaded=30, total=100))
+        snap = agg.update(_event(2, "downloading", downloaded=40, total=100))
+        self.assertEqual(snap.downloaded_bytes, 70)
+
+    def test_total_bytes_sums_known_sizes_only(self):
+        agg = ProgressAggregator(total=2)
+        agg.update(_event(1, "downloading", downloaded=10, total=100))
+        snap = agg.snapshot()
+        self.assertEqual(snap.total_bytes, 100)
+
+    def test_total_bytes_is_none_when_nothing_known_yet(self):
+        agg = ProgressAggregator(total=2)
+        snap = agg.snapshot()
+        self.assertIsNone(snap.total_bytes)
+
+    def test_eta_is_slowest_active_item(self):
+        agg = ProgressAggregator(total=2)
+        agg.update(_event(1, "downloading", downloaded=10, total=100, eta=5))
+        snap = agg.update(_event(2, "downloading", downloaded=10, total=100, eta=30))
+        self.assertEqual(snap.eta, 30)
+
+    def test_eta_ignores_finished_items(self):
+        agg = ProgressAggregator(total=1)
+        agg.update(_event(1, "downloading", downloaded=10, total=100, eta=5))
+        snap = agg.update(_event(1, "finished"))
+        self.assertIsNone(snap.eta)
 
 
 if __name__ == "__main__":

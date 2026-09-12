@@ -19,6 +19,7 @@ def _plan(
     video_count: int = 2,
     title: str = "Test Job",
     existing_file_behavior: str = "skip",
+    thumbnail=None,
 ) -> RunPlan:
     return RunPlan(
         quality=QualityChoice(label="best"),
@@ -34,6 +35,7 @@ def _plan(
         video_count=video_count,
         concurrency=1,
         concurrent_fragments=4,
+        thumbnail=thumbnail,
     )
 
 
@@ -61,14 +63,19 @@ class TestJobLifecycle(unittest.TestCase):
     def test_snapshot_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = JobManager(downloader_factory=FakeDownloader)
-            job_id = manager.submit(_plan(Path(tmp), title="My Video"))
+            job_id = manager.submit(
+                _plan(Path(tmp), title="My Video", thumbnail="https://example.com/thumb.jpg")
+            )
             _wait_until(lambda: manager.get(job_id).state == JobState.COMPLETED)
 
             snap = manager.get(job_id).snapshot()
             self.assertEqual(snap["id"], job_id)
             self.assertEqual(snap["state"], "completed")
             self.assertEqual(snap["title"], "My Video")
+            self.assertEqual(snap["thumbnail"], "https://example.com/thumb.jpg")
             self.assertEqual(snap["progress"]["completed"], 2)
+            self.assertIn("downloaded_bytes", snap["progress"])
+            self.assertIn("eta", snap["progress"])
             self.assertEqual(len(snap["results"]), 2)
 
     def test_get_unknown_job_returns_none(self):

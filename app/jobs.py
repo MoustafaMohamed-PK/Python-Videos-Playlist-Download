@@ -76,6 +76,7 @@ class Job:
             "id": self.id,
             "state": self.state.value,
             "title": self.plan.title,
+            "thumbnail": self.plan.thumbnail,
             "is_playlist": self.plan.is_playlist,
             "video_count": self.plan.video_count,
             "created_at": self.created_at,
@@ -88,6 +89,9 @@ class Job:
                     "overall_fraction": prog.overall_fraction,
                     "active_count": prog.active_count,
                     "total_speed": prog.total_speed,
+                    "downloaded_bytes": prog.downloaded_bytes,
+                    "total_bytes": prog.total_bytes,
+                    "eta": prog.eta,
                 }
                 if prog
                 else None

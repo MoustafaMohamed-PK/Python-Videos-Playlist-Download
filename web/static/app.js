@@ -80,14 +80,19 @@
 
   function formatSpeed(bytesPerSec) {
     if (!bytesPerSec) return "";
+    return `${formatBytes(bytesPerSec)}/s`;
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes && bytes !== 0) return "";
     const units = ["B", "KB", "MB", "GB"];
-    let value = bytesPerSec;
+    let value = bytes;
     let unit = 0;
     while (value >= 1024 && unit < units.length - 1) {
       value /= 1024;
       unit += 1;
     }
-    return `${value.toFixed(1)} ${units[unit]}/s`;
+    return `${value.toFixed(1)} ${units[unit]}`;
   }
 
   // ---- Analyze ----
@@ -216,6 +221,14 @@
 
     card.querySelector(".job-title").textContent = job.title;
 
+    const thumbEl = card.querySelector(".job-thumb");
+    if (job.thumbnail) {
+      if (thumbEl.src !== job.thumbnail) thumbEl.src = job.thumbnail;
+      thumbEl.hidden = false;
+    } else {
+      thumbEl.hidden = true;
+    }
+
     const stateEl = card.querySelector(".job-state");
     stateEl.textContent = job.state;
     stateEl.className = `job-state badge state-${job.state}`;
@@ -229,6 +242,12 @@
       const parts = [`${progress.completed}/${progress.total} done`];
       if (progress.active_count > 0) parts.push(`${progress.active_count} active`);
       if (progress.total_speed > 0) parts.push(formatSpeed(progress.total_speed));
+      if (progress.total_bytes) {
+        parts.push(`${formatBytes(progress.downloaded_bytes)}/${formatBytes(progress.total_bytes)}`);
+      }
+      if (progress.eta !== null && progress.eta !== undefined && job.state === "running") {
+        parts.push(`ETA ${formatDuration(progress.eta)}`);
+      }
       statsEl.textContent = parts.join(" · ");
     } else {
       statsEl.textContent = "";

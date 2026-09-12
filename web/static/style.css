@@ -164,6 +164,24 @@ button:disabled { opacity: 0.6; cursor: default; }
   padding: 14px;
 }
 
+.job-body {
+  display: flex;
+  gap: 12px;
+}
+
+.job-thumb {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.job-main {
+  flex: 1;
+  min-width: 0;
+}
+
 .job-header {
   display: flex;
   justify-content: space-between;
@@ -199,9 +217,18 @@ button:disabled { opacity: 0.6; cursor: default; }
 .state-failed, .state-cancelled { color: var(--danger); background: transparent; border: 1px solid var(--danger); }
 .state-running, .state-queued { color: var(--accent); background: transparent; border: 1px solid var(--accent); }
 
+@media (max-width: 420px) {
+  .job-thumb { width: 64px; height: 64px; }
+}
+
 /* Folder browser (modal-style overlay) */
 
-.browse-panel {
+/* Scoped to [open] deliberately: an author rule on the bare class
+   would override the UA stylesheet's `dialog:not([open]) { display:
+   none }` regardless of specificity (author styles always beat UA
+   styles in the cascade), forcing the dialog visible at page load
+   instead of only when .showModal() is called. */
+.browse-panel[open] {
   position: fixed;
   inset: 0;
   margin: auto;

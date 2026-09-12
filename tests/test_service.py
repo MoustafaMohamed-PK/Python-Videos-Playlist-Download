@@ -29,11 +29,12 @@ WEBM_ONLY_FORMATS = [
 ]
 
 
-def _single_video_target(formats=SAMPLE_FORMATS) -> ExtractedTarget:
+def _single_video_target(formats=SAMPLE_FORMATS, thumbnail=None) -> ExtractedTarget:
+    raw = {"thumbnail": thumbnail} if thumbnail else {}
     return ExtractedTarget(
         is_playlist=False,
         playlist_title=None,
-        videos=[VideoInfo(id="dQw4w9WgXcQ", title="Test Video", uploader="ChannelX")],
+        videos=[VideoInfo(id="dQw4w9WgXcQ", title="Test Video", uploader="ChannelX", raw=raw)],
         formats=formats,
     )
 
@@ -106,6 +107,15 @@ class TestAnalyze(unittest.TestCase):
             analyze("not a url", extractor=extractor)
         self.assertEqual(extractor.calls, [])  # never reached extraction
 
+    def test_thumbnail_is_extracted_from_first_video(self):
+        target = _single_video_target(thumbnail="https://example.com/thumb.jpg")
+        result = analyze(YOUTUBE_URL, extractor=FakeExtractor(target))
+        self.assertEqual(result.thumbnail, "https://example.com/thumb.jpg")
+
+    def test_thumbnail_is_none_when_not_reported(self):
+        result = analyze(YOUTUBE_URL, extractor=FakeExtractor(_single_video_target()))
+        self.assertIsNone(result.thumbnail)
+
 
 class TestPlan(unittest.TestCase):
     def test_available_quality_produces_run_plan(self):
@@ -120,6 +130,18 @@ class TestPlan(unittest.TestCase):
         self.assertEqual(run_plan.quality, QualityChoice(label="1080p"))
         self.assertTrue(run_plan.prefer_mp4)  # avc1/mp4a present
         self.assertEqual(run_plan.video_urls, [YOUTUBE_URL])
+
+    def test_thumbnail_carries_through_to_run_plan(self):
+        target = _single_video_target(thumbnail="https://example.com/thumb.jpg")
+        analysis = analyze(YOUTUBE_URL, extractor=FakeExtractor(target))
+        request = DownloadRequest(
+            quality_label="1080p",
+            destination=Path("/tmp/whatever"),
+            filename_mode="original",
+            filename_pattern=None,
+        )
+        run_plan = plan(request, analysis)
+        self.assertEqual(run_plan.thumbnail, "https://example.com/thumb.jpg")
 
     def test_unavailable_quality_raises_with_real_menu(self):
         analysis = analyze(YOUTUBE_URL, extractor=FakeExtractor(_single_video_target()))

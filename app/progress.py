@@ -67,6 +67,33 @@ class Snapshot:
     def active_count(self) -> int:
         return sum(1 for item in self.items.values() if item.status == "downloading")
 
+    @property
+    def downloaded_bytes(self) -> float:
+        """Bytes downloaded so far, summed across all known items."""
+        return sum(item.downloaded_bytes or 0.0 for item in self.items.values())
+
+    @property
+    def total_bytes(self) -> Optional[float]:
+        """Combined size of items whose size is known, or None if none is.
+
+        Not a true "total for the whole job" when some items haven't
+        started yet (their size isn't known until they do) -- treated
+        as an honest running total rather than a falsely precise one,
+        same reasoning as overall_fraction above.
+        """
+        known = [item.total_bytes for item in self.items.values() if item.total_bytes]
+        return sum(known) if known else None
+
+    @property
+    def eta(self) -> Optional[float]:
+        """Seconds remaining, taken as the slowest currently-active item's ETA."""
+        etas = [
+            item.eta
+            for item in self.items.values()
+            if item.status == "downloading" and item.eta is not None
+        ]
+        return max(etas) if etas else None
+
 
 class ProgressAggregator:
     """Merges ProgressEvents from any number of threads into one Snapshot."""
