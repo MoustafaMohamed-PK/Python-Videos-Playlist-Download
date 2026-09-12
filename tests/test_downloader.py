@@ -1,0 +1,195 @@
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import yt_dlp
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.downloader import Downloader, VideoResult
+from app.formats import QualityChoice
+
+
+class _FakeWorkDownloader(Downloader):
+    """Downloader subclass with download_one faked out.
+
+    Tests download_many's orchestration (ordering, concurrency,
+    cancellation) without touching yt-dlp or the network -- the thing
+    actually under test here is the ThreadPoolExecutor wiring in
+    app/downloader.py, not yt-dlp itself.
+    """
+
+    def __init__(self, *args, delay: float = 0.05, fail_indices=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.delay = delay
+        self.fail_indices = set(fail_indices)
+        self.active = 0
+        self.max_active = 0
+        self.started_order = []
+        self._lock = threading.Lock()
+
+    def download_one(self, url, index, video_total, metadata):
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.started_order.append(index)
+        time.sleep(self.delay)
+        with self._lock:
+            self.active -= 1
+
+        title = metadata.get("title", "")
+        if index in self.fail_indices:
+            return VideoResult(index=index, title=title, success=False, error="boom")
+        return VideoResult(index=index, title=title, success=True, output_path=Path(f"/tmp/item{index}"))
+
+
+def _make_downloader(cls=_FakeWorkDownloader, **kwargs):
+    return cls(
+        destination=Path("/tmp/ytdl_test_downloader"),
+        quality=QualityChoice(label="best"),
+        filename_mode="original",
+        filename_pattern=None,
+        **kwargs,
+    )
+
+
+class TestDownloadManySequential(unittest.TestCase):
+    def test_downloads_in_order_one_at_a_time(self):
+        d = _make_downloader(delay=0.02)
+        urls = [f"https://example.com/{i}" for i in range(1, 6)]
+        metas = [{"title": f"Item {i}"} for i in range(1, 6)]
+
+        result = d.download_many(urls, metas, concurrency=1)
+
+        self.assertEqual(d.max_active, 1)
+        self.assertEqual(d.started_order, [1, 2, 3, 4, 5])
+        self.assertEqual([r.index for r in result.results], [1, 2, 3, 4, 5])
+        self.assertEqual(result.downloaded, 5)
+
+    def test_stop_on_first_failure_halts_remaining_items(self):
+        d = _make_downloader(delay=0.01, fail_indices={2})
+        urls = [f"https://example.com/{i}" for i in range(1, 6)]
+        metas = [{"title": f"Item {i}"} for i in range(1, 6)]
+
+        result = d.download_many(urls, metas, concurrency=1, stop_on_first_failure=True)
+
+        self.assertEqual([r.index for r in result.results], [1, 2])
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.downloaded, 1)
+
+
+class TestDownloadManyConcurrent(unittest.TestCase):
+    def test_items_run_in_parallel(self):
+        d = _make_downloader(delay=0.1)
+        urls = [f"https://example.com/{i}" for i in range(1, 6)]
+        metas = [{"title": f"Item {i}"} for i in range(1, 6)]
+
+        result = d.download_many(urls, metas, concurrency=3)
+
+        self.assertGreater(d.max_active, 1)
+        self.assertLessEqual(d.max_active, 3)
+        self.assertEqual(result.downloaded, 5)
+
+    def test_results_are_returned_in_original_order_regardless_of_completion_order(self):
+        # Later-indexed items finish first (shorter delay) to prove
+        # ordering comes from a post-hoc sort, not completion order.
+        d = _make_downloader(delay=0.0)
+        d.download_one = lambda url, index, total, meta: (
+            time.sleep(0.05 / index),  # higher index finishes sooner
+            VideoResult(index=index, title="", success=True),
+        )[1]
+        urls = [f"https://example.com/{i}" for i in range(1, 6)]
+        metas = [{"title": f"Item {i}"} for i in range(1, 6)]
+
+        result = d.download_many(urls, metas, concurrency=5)
+
+        self.assertEqual([r.index for r in result.results], [1, 2, 3, 4, 5])
+
+    def test_stop_on_first_failure_sets_cancel_event(self):
+        cancel_event = threading.Event()
+        d = _make_downloader(delay=0.02, fail_indices={1}, cancel_event=cancel_event)
+        urls = [f"https://example.com/{i}" for i in range(1, 4)]
+        metas = [{"title": f"Item {i}"} for i in range(1, 4)]
+
+        d.download_many(urls, metas, concurrency=3, stop_on_first_failure=True)
+
+        self.assertTrue(cancel_event.is_set())
+
+    def test_preset_cancel_event_skips_all_items(self):
+        cancel_event = threading.Event()
+        cancel_event.set()
+        d = _make_downloader(cancel_event=cancel_event)
+        urls = [f"https://example.com/{i}" for i in range(1, 4)]
+        metas = [{"title": f"Item {i}"} for i in range(1, 4)]
+
+        result = d.download_many(urls, metas, concurrency=3)
+
+        self.assertEqual(result.results, [])
+        self.assertEqual(d.started_order, [])
+
+
+class TestProgressHookCancellation(unittest.TestCase):
+    def test_hook_raises_download_cancelled_when_event_is_set(self):
+        cancel_event = threading.Event()
+        cancel_event.set()
+        d = _make_downloader(cls=Downloader, cancel_event=cancel_event)
+        hook = d._make_progress_hook(1, 1, "Title")
+        with self.assertRaises(yt_dlp.utils.DownloadCancelled):
+            hook({"status": "downloading"})
+
+    def test_hook_does_not_raise_when_no_cancel_event(self):
+        d = _make_downloader(cls=Downloader)
+        hook = d._make_progress_hook(1, 1, "Title")
+        hook({"status": "downloading"})  # must not raise
+
+
+class TestDownloadOneErrorClassification(unittest.TestCase):
+    """The one place mocking yt_dlp.YoutubeDL directly is justified:
+    verifying download_one translates a raw yt-dlp DownloadError into
+    the app's friendly, typed error message -- this is the only path
+    that actually needs a real yt-dlp exception shape, which nothing
+    else in the fixture-based test suite can produce without a real
+    network call.
+    """
+
+    @patch("app.downloader.yt_dlp.YoutubeDL")
+    def test_private_video_error_is_classified(self, mock_ydl_cls):
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: Private video. Sign in if you've been granted access to this video"
+        )
+        mock_ydl_cls.return_value = mock_instance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_downloader(cls=Downloader)
+            d.destination = Path(tmp)
+            result = d.download_one("https://example.com/v", 1, 1, {"title": "T"})
+
+        self.assertFalse(result.success)
+        self.assertIn("private", result.error.lower())
+
+    @patch("app.downloader.yt_dlp.YoutubeDL")
+    def test_ffmpeg_missing_error_is_classified(self, mock_ydl_cls):
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: ffmpeg not found. Please install"
+        )
+        mock_ydl_cls.return_value = mock_instance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_downloader(cls=Downloader)
+            d.destination = Path(tmp)
+            result = d.download_one("https://example.com/v", 1, 1, {"title": "T"})
+
+        self.assertFalse(result.success)
+        self.assertIn("ffmpeg", result.error.lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

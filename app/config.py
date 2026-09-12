@@ -36,6 +36,8 @@ class AppConfig:
     filename_mode: str = "original"  # original | numbered | pattern
     filename_pattern: str = "{title}"
     existing_file_behavior: str = "skip"  # skip | overwrite | ask
+    concurrency: int = 3  # playlist items downloaded in parallel
+    concurrent_fragments: int = 4  # yt-dlp's own DASH/HLS fragment parallelism, per item
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -47,7 +49,10 @@ class AppConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":
         clean = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        return cls(**clean)
+        config = cls(**clean)
+        config.concurrency = max(1, min(8, config.concurrency))
+        config.concurrent_fragments = max(1, min(8, config.concurrent_fragments))
+        return config
 
 
 class ConfigManager:

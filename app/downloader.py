@@ -17,6 +17,8 @@ presentation.
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -321,6 +323,8 @@ class Downloader:
         progress_callback: Optional[ProgressCallback] = None,
         ask_overwrite_callback: Optional[Callable[[str], str]] = None,
         prefer_mp4: bool = True,
+        concurrent_fragments: int = 4,
+        cancel_event: Optional[threading.Event] = None,
     ):
         self.destination = destination
         self.quality = quality
@@ -337,6 +341,14 @@ class Downloader:
         # know in advance (e.g. a playlist, whose per-item formats
         # aren't resolved until download time).
         self.prefer_mp4 = prefer_mp4
+        # yt-dlp's own DASH/HLS fragment parallelism *within* one item;
+        # unrelated to how many playlist items run at once (that's
+        # download_many's `concurrency` argument).
+        self.concurrent_fragments = concurrent_fragments
+        # Checked from the progress hook (called frequently during a
+        # download) and before submitting each new item in
+        # download_many; set it to interrupt an in-progress run.
+        self.cancel_event = cancel_event
 
         if not self.quality.is_audio_only and not ffmpeg_available():
             # We don't hard-fail here because many single-quality
@@ -356,6 +368,13 @@ class Downloader:
 
     def _make_progress_hook(self, video_index: int, video_total: int, title: str):
         def hook(d: Dict[str, Any]) -> None:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                # Progress hook exceptions propagate out of ydl.download()
+                # uncaught (verified: FileDownloader doesn't swallow
+                # them), so this is how a cancel_event actually stops an
+                # in-progress download rather than just skipping queued
+                # ones.
+                raise yt_dlp.utils.DownloadCancelled("Cancelled by user")
             if not self.progress_callback:
                 return
             status = d.get("status")
@@ -403,6 +422,7 @@ class Downloader:
             "fragment_retries": 5,
             "progress_hooks": [self._make_progress_hook(video_index, video_total, title)],
             "noplaylist": True,  # we drive playlist iteration ourselves
+            "concurrent_fragment_downloads": self.concurrent_fragments,
             # A preference list, not a hard requirement (yt-dlp picks the
             # first one whose codecs actually fit -- see
             # get_compatible_ext): falls back to mkv rather than forcing
@@ -481,6 +501,9 @@ class Downloader:
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
+        except yt_dlp.utils.DownloadCancelled:
+            logger.info("Download cancelled | url=%s", url)
+            return VideoResult(index=index, title=title, success=False, error="Cancelled")
         except yt_dlp.utils.DownloadError as exc:
             friendly = classify_ytdlp_error(exc)
             logger.error("Download failed | url=%s | reason=%s", url, friendly)
@@ -499,25 +522,62 @@ class Downloader:
         video_urls: List[Optional[str]],
         metadatas: List[Dict[str, Any]],
         stop_on_first_failure: bool = False,
+        concurrency: int = 1,
     ) -> DownloadRunResult:
         """Download a sequence of videos (used for playlists).
 
         A failure on one item does not stop the rest unless
-        ``stop_on_first_failure`` is True.
-        """
-        run_result = DownloadRunResult(destination=self.destination)
-        total = len(video_urls)
+        ``stop_on_first_failure`` is True (which then also sets
+        ``cancel_event`` if one was provided, so an already-downloading
+        item's progress hook can stop it rather than just preventing new
+        ones from starting).
 
-        for i, (url, meta) in enumerate(zip(video_urls, metadatas), start=1):
-            result = self.download_one(url, i, total, meta)
-            run_result.results.append(result)
+        ``concurrency == 1`` (the default) downloads strictly in order,
+        exactly as before -- deterministic and gentle on sites that
+        rate-limit. ``concurrency > 1`` downloads that many items at
+        once via a thread pool; results are still returned in original
+        order regardless of completion order. Each item gets its own
+        ``yt_dlp.YoutubeDL`` instance (download_one already does this) --
+        required, not just safer, since a YoutubeDL instance owns
+        mutable per-download state (cookiejar, extractor instances,
+        counters) and isn't safe to share across threads.
+        """
+        total = len(video_urls)
+        run_result = DownloadRunResult(destination=self.destination)
+
+        def record(result: VideoResult) -> None:
             if result.skipped:
                 run_result.skipped += 1
             elif result.success:
                 run_result.downloaded += 1
             else:
                 run_result.failed += 1
-                if stop_on_first_failure:
-                    break
+                if stop_on_first_failure and self.cancel_event is not None:
+                    self.cancel_event.set()
 
+        if concurrency <= 1:
+            for i, (url, meta) in enumerate(zip(video_urls, metadatas), start=1):
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    break
+                result = self.download_one(url, i, total, meta)
+                run_result.results.append(result)
+                record(result)
+                if not result.success and not result.skipped and stop_on_first_failure:
+                    break
+            return run_result
+
+        results: Dict[int, VideoResult] = {}
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {}
+            for i, (url, meta) in enumerate(zip(video_urls, metadatas), start=1):
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    break
+                futures[executor.submit(self.download_one, url, i, total, meta)] = i
+
+            for future in as_completed(futures):
+                result = future.result()
+                results[result.index] = result
+                record(result)
+
+        run_result.results = [results[i] for i in sorted(results)]
         return run_result

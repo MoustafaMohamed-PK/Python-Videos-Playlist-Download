@@ -73,6 +73,8 @@ class FakeDownloader:
         progress_callback=None,
         ask_overwrite_callback=None,
         prefer_mp4: bool = True,
+        concurrent_fragments: int = 4,
+        cancel_event=None,
     ):
         self.destination = destination
         self.quality = quality
@@ -82,12 +84,15 @@ class FakeDownloader:
         self.progress_callback = progress_callback
         self.ask_overwrite_callback = ask_overwrite_callback
         self.prefer_mp4 = prefer_mp4
+        self.concurrent_fragments = concurrent_fragments
+        self.cancel_event = cancel_event
 
     def download_many(
         self,
         video_urls: List[Optional[str]],
         metadatas: List[Dict[str, Any]],
         stop_on_first_failure: bool = False,
+        concurrency: int = 1,
     ) -> DownloadRunResult:
         self.destination.mkdir(parents=True, exist_ok=True)
         run_result = DownloadRunResult(destination=self.destination)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -17,6 +18,7 @@ from app.config import AppConfig, ConfigManager
 from app.downloader import DownloadAppError, ProgressEvent
 from app.filename import FilenameError, validate_pattern
 from app.formats import QualityChoice, QualityOption
+from app.progress import ProgressAggregator
 from app.prompts import prompt_choice, prompt_int_in_range, prompt_yes_no
 from app.service import (
     AnalyzeResult,
@@ -86,6 +88,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--playlist",
         action="store_true",
         help="Force treating the URL as a playlist.",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        help="Playlist items to download in parallel, 1-8 (default: from config, normally 3).",
     )
     parser.add_argument(
         "--config",
@@ -239,6 +246,43 @@ def make_progress_printer():
     return callback
 
 
+def make_concurrent_progress_printer(total: int):
+    """Progress callback for when more than one item downloads at once.
+
+    A single "downloading N%" line no longer describes what's
+    happening once several playlist items are in flight simultaneously,
+    so this renders one throttled aggregate line via ProgressAggregator
+    instead -- overall fraction, how many finished, how many active,
+    and combined speed across all of them.
+    """
+    aggregator = ProgressAggregator(total=total)
+    last_printed = {"time": 0.0}
+
+    def callback(event: ProgressEvent) -> None:
+        snapshot = aggregator.update(event)
+        now = time.monotonic()
+        # Throttle to ~5Hz regardless of how many items report progress,
+        # so higher concurrency doesn't flood the terminal.
+        is_done = snapshot.completed >= snapshot.total
+        if not is_done and now - last_printed["time"] < 0.2:
+            return
+        last_printed["time"] = now
+
+        bar = render_progress_bar(snapshot.overall_fraction)
+        pct = int(snapshot.overall_fraction * 100)
+        line = (
+            f"\r{bar} {pct:3d}% | {snapshot.completed}/{snapshot.total} done | "
+            f"{snapshot.active_count} active | {format_speed(snapshot.total_speed)}"
+        )
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        if is_done:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+    return callback
+
+
 def print_summary(run_result, target_kind: str, extra_title: Optional[str] = None) -> None:
     print_header("Download completed")
     if extra_title:
@@ -268,6 +312,8 @@ def run_download_workflow(
     existing_file_behavior: str,
     interactive: bool,
     analysis: Optional[AnalyzeResult] = None,
+    concurrency: int = 1,
+    concurrent_fragments: int = 4,
 ) -> int:
     """Runs the full analyze -> plan -> confirm -> download -> summarize workflow.
 
@@ -293,6 +339,8 @@ def run_download_workflow(
         filename_mode=filename_mode,
         filename_pattern=filename_pattern,
         existing_file_behavior=existing_file_behavior,
+        concurrency=concurrency,
+        concurrent_fragments=concurrent_fragments,
     )
     try:
         run_plan = plan(request, analysis)
@@ -328,9 +376,14 @@ def run_download_workflow(
             print("Cancelled.")
             return 0
 
+    progress_callback = (
+        make_concurrent_progress_printer(run_plan.video_count)
+        if run_plan.concurrency > 1
+        else make_progress_printer()
+    )
     run_result = execute(
         run_plan,
-        progress_callback=make_progress_printer(),
+        progress_callback=progress_callback,
         ask_overwrite_callback=interactive_ask_overwrite if interactive else None,
     )
     print_summary(run_result, "playlist" if run_plan.is_playlist else "video", run_plan.title)
@@ -377,6 +430,8 @@ def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
         existing_file_behavior=existing_behavior,
         interactive=True,
         analysis=analysis,
+        concurrency=config.concurrency,
+        concurrent_fragments=config.concurrent_fragments,
     )
 
 
@@ -429,6 +484,7 @@ def run_from_args(args: argparse.Namespace, config: AppConfig) -> int:
             return 1
 
     existing_behavior = args.overwrite or config.existing_file_behavior
+    concurrency = args.concurrency if args.concurrency is not None else config.concurrency
 
     return run_download_workflow(
         url=url,
@@ -438,6 +494,8 @@ def run_from_args(args: argparse.Namespace, config: AppConfig) -> int:
         filename_pattern=filename_pattern,
         existing_file_behavior=existing_behavior,
         interactive=False,
+        concurrency=concurrency,
+        concurrent_fragments=config.concurrent_fragments,
     )
 
 

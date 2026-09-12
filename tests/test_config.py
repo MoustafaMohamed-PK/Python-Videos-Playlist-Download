@@ -29,6 +29,20 @@ class TestAppConfigDefaults(unittest.TestCase):
         self.assertEqual(config.quality, "720p")
         self.assertFalse(hasattr(config, "unexpected_key"))
 
+    def test_concurrency_defaults(self):
+        config = AppConfig()
+        self.assertEqual(config.concurrency, 3)
+        self.assertEqual(config.concurrent_fragments, 4)
+
+    def test_from_dict_clamps_concurrency_to_valid_range(self):
+        too_high = AppConfig.from_dict({"concurrency": 999, "concurrent_fragments": 999})
+        self.assertEqual(too_high.concurrency, 8)
+        self.assertEqual(too_high.concurrent_fragments, 8)
+
+        too_low = AppConfig.from_dict({"concurrency": 0, "concurrent_fragments": -5})
+        self.assertEqual(too_low.concurrency, 1)
+        self.assertEqual(too_low.concurrent_fragments, 1)
+
 
 class TestConfigManager(unittest.TestCase):
     def setUp(self):

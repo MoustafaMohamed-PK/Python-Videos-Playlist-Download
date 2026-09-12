@@ -23,6 +23,7 @@ hitting the network (see tests/fakes.py).
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -89,6 +90,8 @@ class DownloadRequest:
     filename_mode: str
     filename_pattern: Optional[str]
     existing_file_behavior: str = "skip"
+    concurrency: int = 1  # playlist items downloaded in parallel
+    concurrent_fragments: int = 4  # yt-dlp's own per-item fragment parallelism
 
 
 @dataclass
@@ -106,6 +109,8 @@ class RunPlan:
     title: str
     is_playlist: bool
     video_count: int
+    concurrency: int
+    concurrent_fragments: int
 
 
 def _ladder_menu() -> List[QualityOption]:
@@ -198,8 +203,9 @@ def plan(request: DownloadRequest, analysis: AnalyzeResult) -> RunPlan:
     Raises :class:`QualityUnavailableError` (carrying the real menu) if
     the requested quality doesn't exist for a single video. Playlists
     aren't validated here -- their per-item formats aren't known until
-    each item downloads (see app/downloader.py's height<= selector
-    fallback tiers and per-item ``actual_height`` reporting).
+    each item downloads, so a per-item request instead relies on
+    app/formats.py's height<= selector fallback tiers to get as close
+    as possible to what was asked for.
     """
     quality = QualityChoice(label=request.quality_label)
 
@@ -231,6 +237,12 @@ def plan(request: DownloadRequest, analysis: AnalyzeResult) -> RunPlan:
         title=analysis.title,
         is_playlist=analysis.is_playlist,
         video_count=len(analysis.videos),
+        # "concurrency" means playlist items in parallel; a single video
+        # is always exactly one item, so force it to 1 regardless of
+        # what was requested rather than spinning up an unused thread
+        # pool for it.
+        concurrency=max(1, min(8, request.concurrency)) if analysis.is_playlist else 1,
+        concurrent_fragments=max(1, min(8, request.concurrent_fragments)),
     )
 
 
@@ -239,6 +251,7 @@ def execute(
     *,
     progress_callback: Optional[ProgressCallback] = None,
     ask_overwrite_callback: Optional[Callable[[str], str]] = None,
+    cancel_event: Optional[threading.Event] = None,
     downloader_factory: DownloaderFactory = Downloader,
 ) -> DownloadRunResult:
     """Run a validated :class:`RunPlan` and return the result."""
@@ -251,5 +264,9 @@ def execute(
         progress_callback=progress_callback,
         ask_overwrite_callback=ask_overwrite_callback,
         prefer_mp4=run_plan.prefer_mp4,
+        concurrent_fragments=run_plan.concurrent_fragments,
+        cancel_event=cancel_event,
     )
-    return downloader.download_many(run_plan.video_urls, run_plan.metadatas)
+    return downloader.download_many(
+        run_plan.video_urls, run_plan.metadatas, concurrency=run_plan.concurrency
+    )
