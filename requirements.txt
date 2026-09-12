@@ -1,6 +1,13 @@
 # Core download engine
 yt-dlp>=2024.8.6
 
+# Browser impersonation backend for yt-dlp. Required by sites that
+# block non-browser HTTP clients (Dailymotion among them) -- without
+# it, yt-dlp raises "The extractor is attempting impersonation, but
+# none of these impersonate targets are available". See
+# https://github.com/yt-dlp/yt-dlp#impersonation
+curl_cffi>=0.5.10
+
 # Web UI (optional -- only needed to run webmain.py, not the CLI)
 Flask>=3.0
 waitress>=3.0

@@ -367,6 +367,13 @@ this app is designed and hardened around:
   any of yt-dlp's site-specific extractors, and yt-dlp's generic
   fallback (which handles many smaller sites) didn't match either. Run
   `yt-dlp --list-extractors` to check what's supported.
+- **"The extractor is attempting impersonation, but none of these
+  impersonate targets are available"** — some sites (Dailymotion among
+  them) block non-browser HTTP clients and require yt-dlp to mimic a
+  real browser's network fingerprint, which needs the `curl_cffi`
+  package (already in `requirements.txt` — reinstall with
+  `pip install -r requirements.txt`, or directly with
+  `pip install curl_cffi`, if it's missing from your environment).
 - **"This video is age-restricted and requires authentication"** — this
   app does not manage login cookies/authentication; age-restricted
   videos requiring sign-in can't be downloaded.
