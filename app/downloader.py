@@ -127,7 +127,7 @@ def classify_ytdlp_error(exc: Exception) -> DownloadAppError:
         )
     if "certificate" in message or "ssl" in message:
         return NetworkError(
-            "A secure connection to YouTube could not be established "
+            "A secure connection to the site could not be established "
             "(SSL/certificate error). Check your network/proxy settings "
             "and try again."
         )
@@ -202,15 +202,22 @@ ProgressCallback = Callable[[ProgressEvent], None]
 # Extraction (metadata only, no download)
 # --------------------------------------------------------------------------
 
-def extract_target(url: str) -> ExtractedTarget:
+def extract_target(url: str, *, flat: bool = True) -> ExtractedTarget:
     """Fetch metadata for ``url`` without downloading anything.
+
+    ``flat=True`` (the default) uses yt-dlp's flat playlist extraction,
+    which is fast but leaves each playlist entry as a stub (formats
+    unknown, and on some sites no direct video URL). Pass ``flat=False``
+    to fully resolve every entry -- used as a fallback when a flat
+    entry doesn't carry enough information to download it (see
+    :func:`entry_download_url`).
 
     Raises a :class:`DownloadAppError` subclass on failure.
     """
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        "extract_flat": "in_playlist",
+        "extract_flat": "in_playlist" if flat else False,
         "skip_download": True,
         "logger": _SilentYtdlpLogger(),
     }
@@ -225,7 +232,7 @@ def extract_target(url: str) -> ExtractedTarget:
     if info is None:
         raise URLUnavailableError("Could not retrieve any information for this URL.")
 
-    if info.get("_type") == "playlist" or "entries" in info:
+    if info.get("_type") in ("playlist", "multi_video") or "entries" in info:
         entries = [e for e in (info.get("entries") or []) if e]
         videos = [
             VideoInfo(
@@ -261,6 +268,24 @@ def extract_target(url: str) -> ExtractedTarget:
         formats=formats,
         raw=info,
     )
+
+
+def entry_download_url(entry: Dict[str, Any]) -> Optional[str]:
+    """Extract a directly-downloadable URL from a (possibly flat) playlist entry.
+
+    yt-dlp's flat playlist entries vary by site: most carry a full
+    ``webpage_url``, some only a partial ``url`` (occasionally just an
+    id fragment on obscure extractors), and ``original_url`` is a
+    fallback some extractors set. This is deliberately site-agnostic --
+    no per-site URL reconstruction (e.g. hand-building a YouTube watch
+    URL from an id) -- because that only works for the one site it was
+    written for.
+    """
+    for key in ("webpage_url", "url", "original_url"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+    return None
 
 
 def fetch_formats_for_video(url: str) -> List[Dict[str, Any]]:
@@ -390,9 +415,21 @@ class Downloader:
 
         return opts
 
-    def download_one(self, url: str, index: int, video_total: int, metadata: Dict[str, Any]) -> VideoResult:
+    def download_one(
+        self, url: Optional[str], index: int, video_total: int, metadata: Dict[str, Any]
+    ) -> VideoResult:
         """Download a single video (by URL) to its computed target path."""
         title = metadata.get("title") or "Untitled"
+
+        if not url:
+            logger.error("No direct URL available for item %d (%s)", index, title)
+            return VideoResult(
+                index=index,
+                title=title,
+                success=False,
+                error="This site did not provide a direct link for this item.",
+            )
+
         target_path = self._video_index_to_target_path(index, metadata)
 
         if target_path.exists():
@@ -434,7 +471,7 @@ class Downloader:
 
     def download_many(
         self,
-        video_urls: List[str],
+        video_urls: List[Optional[str]],
         metadatas: List[Dict[str, Any]],
         stop_on_first_failure: bool = False,
     ) -> DownloadRunResult:

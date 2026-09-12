@@ -20,6 +20,7 @@ from app.downloader import (
     ExtractedTarget,
     ProgressEvent,
     VideoInfo,
+    entry_download_url,
     extract_target,
     fetch_formats_for_video,
 )
@@ -30,6 +31,8 @@ from app.formats import (
     describe_available_qualities,
     quality_is_available,
 )
+from app.prompts import prompt_choice, prompt_int_in_range, prompt_yes_no
+from app.sites import validate_media_url
 from app.utils import (
     ffmpeg_available,
     format_bytes,
@@ -41,14 +44,10 @@ from app.utils import (
 from app.validators import (
     ValidationError,
     ensure_writable_directory,
-    prompt_choice,
-    prompt_int_in_range,
-    prompt_yes_no,
     validate_destination_path,
-    validate_youtube_url,
 )
 
-APP_TITLE = "YouTube Video Downloader"
+APP_TITLE = "Media Downloader"
 
 
 # --------------------------------------------------------------------------
@@ -58,12 +57,9 @@ APP_TITLE = "YouTube Video Downloader"
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Download YouTube videos and playlists using yt-dlp.",
+        description="Download videos and playlists from any site yt-dlp supports.",
     )
-    parser.add_argument("--url", help="YouTube video or playlist URL.")
-    parser.add_argument(
-        "--type", choices=["video", "playlist"], help="Whether the URL is a single video or a playlist."
-    )
+    parser.add_argument("--url", help="Video or playlist URL (any site yt-dlp supports).")
     parser.add_argument(
         "--quality",
         choices=[label for label, _ in QUALITY_LADDER],
@@ -112,19 +108,11 @@ def print_header(title: str) -> None:
 
 def prompt_url() -> str:
     while True:
-        raw = input("\nEnter YouTube URL: ").strip()
+        raw = input("\nEnter video or playlist URL: ").strip()
         try:
-            return validate_youtube_url(raw)
+            return validate_media_url(raw)
         except ValidationError as exc:
             print(f"  {exc}")
-
-
-def prompt_download_type() -> str:
-    print("\nWhat do you want to download?")
-    print("1. Single Video")
-    print("2. Playlist")
-    choice = prompt_int_in_range("Enter your choice: ", 1, 2)
-    return "video" if choice == 1 else "playlist"
 
 
 def prompt_quality(available_formats: Optional[list] = None) -> QualityChoice:
@@ -138,7 +126,7 @@ def prompt_quality(available_formats: Optional[list] = None) -> QualityChoice:
 
 def prompt_filename_mode() -> tuple[str, Optional[str]]:
     print("\nHow should files be named?")
-    print("1. Original YouTube title")
+    print("1. Original title")
     print("2. Sequential numbering (1.mp4, 2.mp4, ...)")
     print("3. Custom pattern (e.g. lesson_{number})")
     choice = prompt_int_in_range("Choose naming: ", 1, 3)
@@ -355,24 +343,37 @@ def run_download_workflow(
     return 0 if run_result.failed == 0 else 2
 
 
-def _video_urls_for_target(original_url: str, target: ExtractedTarget) -> List[str]:
+def _video_urls_for_target(original_url: str, target: ExtractedTarget) -> List[Optional[str]]:
     """Compute the per-video URL list for downloading.
 
     For a single video, that's just the original URL. For a playlist,
-    yt-dlp's flat extraction gives each entry a "url" (often just the
-    video id) -- normalize to a full watch URL.
+    yt-dlp's flat extraction gives each entry a direct URL on most
+    sites (``webpage_url``/``url``/``original_url``) -- extracted via
+    :func:`app.downloader.entry_download_url`, which is site-agnostic
+    (no per-site URL reconstruction).
+
+    A handful of extractors don't put a direct URL on the flat entry at
+    all. When that happens, re-extract the playlist fully (non-flat)
+    once and use those URLs instead; any entry still missing a URL
+    after that is reported as ``None`` and fails individually at
+    download time rather than being silently skipped or guessed at.
     """
     if not target.is_playlist:
         return [original_url]
 
-    urls = []
-    for video in target.videos:
-        entry_url = video.raw.get("url") or video.id
-        if entry_url and entry_url.startswith("http"):
-            urls.append(entry_url)
-        else:
-            urls.append(f"https://www.youtube.com/watch?v={video.id}")
-    return urls
+    urls: List[Optional[str]] = [entry_download_url(video.raw) for video in target.videos]
+    if None not in urls:
+        return urls
+
+    try:
+        full_target = extract_target(original_url, flat=False)
+    except DownloadAppError:
+        return urls
+
+    full_urls = [entry_download_url(video.raw) for video in full_target.videos]
+    if len(full_urls) != len(urls):
+        return urls
+    return [full or flat for full, flat in zip(full_urls, urls)]
 
 
 # --------------------------------------------------------------------------
@@ -382,7 +383,6 @@ def _video_urls_for_target(original_url: str, target: ExtractedTarget) -> List[s
 def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
     print_header(APP_TITLE)
 
-    prompt_download_type()  # informational; extraction auto-detects playlist vs video
     url = prompt_url()
     quality = prompt_quality()
     filename_mode, filename_pattern = prompt_filename_mode()
@@ -414,7 +414,7 @@ def run_from_args(args: argparse.Namespace, config: AppConfig) -> int:
         return 1
 
     try:
-        url = validate_youtube_url(args.url)
+        url = validate_media_url(args.url)
     except ValidationError as exc:
         print(f"ERROR: {exc}")
         return 1
