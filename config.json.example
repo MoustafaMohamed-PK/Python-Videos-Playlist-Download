@@ -1,0 +1,7 @@
+{
+  "download_folder": "",
+  "quality": "1080p",
+  "filename_mode": "original",
+  "filename_pattern": "{title}",
+  "existing_file_behavior": "skip"
+}

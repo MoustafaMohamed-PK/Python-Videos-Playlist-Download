@@ -1,0 +1,6 @@
+# Core download engine
+yt-dlp>=2024.8.6
+
+# Note: FFmpeg is a required *system* dependency (not a Python package).
+# It must be installed separately and available on PATH.
+# See README.md for platform-specific installation instructions.
