@@ -14,26 +14,18 @@ from pathlib import Path
 from typing import List, Optional
 
 from app.config import AppConfig, ConfigManager
-from app.downloader import (
-    Downloader,
-    DownloadAppError,
-    ExtractedTarget,
-    ProgressEvent,
-    VideoInfo,
-    entry_download_url,
-    extract_target,
-    fetch_formats_for_video,
-)
+from app.downloader import DownloadAppError, ProgressEvent
 from app.filename import FilenameError, validate_pattern
-from app.formats import (
-    QUALITY_LADDER,
-    QualityChoice,
-    QualityOption,
-    build_quality_menu,
-    formats_support_mp4,
-    quality_is_available,
-)
+from app.formats import QualityChoice, QualityOption
 from app.prompts import prompt_choice, prompt_int_in_range, prompt_yes_no
+from app.service import (
+    AnalyzeResult,
+    DownloadRequest,
+    QualityUnavailableError,
+    analyze,
+    execute,
+    plan,
+)
 from app.sites import validate_media_url
 from app.utils import (
     ffmpeg_available,
@@ -275,11 +267,11 @@ def run_download_workflow(
     filename_pattern: Optional[str],
     existing_file_behavior: str,
     interactive: bool,
-    target: Optional[ExtractedTarget] = None,
+    analysis: Optional[AnalyzeResult] = None,
 ) -> int:
-    """Runs the full extract -> confirm -> download -> summarize workflow.
+    """Runs the full analyze -> plan -> confirm -> download -> summarize workflow.
 
-    ``target`` lets a caller that already extracted metadata (the
+    ``analysis`` lets a caller that already analyzed the URL (the
     interactive flow, to build a quality menu before this is called)
     pass it through instead of paying for a second extraction.
 
@@ -287,38 +279,32 @@ def run_download_workflow(
     """
     logger = setup_logging()
 
-    if target is None:
+    if analysis is None:
         try:
-            target = extract_target(url)
+            analysis = analyze(url)
         except DownloadAppError as exc:
             print(f"\nERROR:\n{exc}")
-            logger.error("Extraction failed for %s: %s", url, exc)
+            logger.error("Analysis failed for %s: %s", url, exc)
             return 1
 
-    quality = QualityChoice(label=quality_label)
+    request = DownloadRequest(
+        quality_label=quality_label,
+        destination=destination,
+        filename_mode=filename_mode,
+        filename_pattern=filename_pattern,
+        existing_file_behavior=existing_file_behavior,
+    )
+    try:
+        run_plan = plan(request, analysis)
+    except QualityUnavailableError as exc:
+        print("\nERROR:")
+        print(str(exc))
+        print("\nAvailable:")
+        for option in exc.menu:
+            print(f"  {option.label}")
+        return 1
 
-    # Whether forcing a remux to mp4 makes sense. Known up front for a
-    # single video (real formats are available); for a playlist,
-    # per-item formats aren't resolved until download time, so keep
-    # today's YouTube-shaped default.
-    prefer_mp4 = True
-
-    # For a single video we already have real formats from extraction;
-    # validate the requested quality against them so we never silently
-    # substitute a different one.
-    if not target.is_playlist:
-        formats = target.formats or fetch_formats_for_video(url)
-        prefer_mp4 = formats_support_mp4(formats)
-        if not quality_is_available(quality, formats):
-            menu = build_quality_menu(formats)
-            print("\nERROR:")
-            print(f"The selected {quality_label} quality is not available for this video.")
-            print("\nAvailable:")
-            for option in menu:
-                print(f"  {option.label}")
-            return 1
-
-    if not quality.is_audio_only and not ffmpeg_available():
+    if not run_plan.quality.is_audio_only and not ffmpeg_available():
         print(
             "\nNote: FFmpeg was not found on PATH. FFmpeg is required to merge "
             "separate video/audio streams. If the selected quality needs a "
@@ -326,14 +312,11 @@ def run_download_workflow(
             "it is on PATH."
         )
 
-    video_count = len(target.videos)
-    title_for_summary = target.playlist_title if target.is_playlist else target.videos[0].title
-
     print_header("Download Summary")
-    print(f"Type       : {'Playlist' if target.is_playlist else 'Single Video'}")
-    print(f"Title      : {title_for_summary}")
-    if target.is_playlist:
-        print(f"Videos     : {video_count}")
+    print(f"Type       : {'Playlist' if run_plan.is_playlist else 'Single Video'}")
+    print(f"Title      : {run_plan.title}")
+    if run_plan.is_playlist:
+        print(f"Videos     : {run_plan.video_count}")
     print(f"Quality    : {quality_label}")
     naming_display = filename_pattern if filename_mode == "pattern" else filename_mode
     print(f"Naming     : {naming_display}")
@@ -345,78 +328,19 @@ def run_download_workflow(
             print("Cancelled.")
             return 0
 
-    downloader = Downloader(
-        destination=destination,
-        quality=quality,
-        filename_mode=filename_mode,
-        filename_pattern=filename_pattern,
-        existing_file_behavior=existing_file_behavior,
+    run_result = execute(
+        run_plan,
         progress_callback=make_progress_printer(),
         ask_overwrite_callback=interactive_ask_overwrite if interactive else None,
-        prefer_mp4=prefer_mp4,
     )
-
-    video_urls = _video_urls_for_target(url, target)
-    metadatas = [
-        {"title": v.title, "uploader": v.uploader} for v in target.videos
-    ]
-
-    run_result = downloader.download_many(video_urls, metadatas)
-    print_summary(run_result, "playlist" if target.is_playlist else "video", title_for_summary)
+    print_summary(run_result, "playlist" if run_plan.is_playlist else "video", run_plan.title)
 
     return 0 if run_result.failed == 0 else 2
-
-
-def _video_urls_for_target(original_url: str, target: ExtractedTarget) -> List[Optional[str]]:
-    """Compute the per-video URL list for downloading.
-
-    For a single video, that's just the original URL. For a playlist,
-    yt-dlp's flat extraction gives each entry a direct URL on most
-    sites (``webpage_url``/``url``/``original_url``) -- extracted via
-    :func:`app.downloader.entry_download_url`, which is site-agnostic
-    (no per-site URL reconstruction).
-
-    A handful of extractors don't put a direct URL on the flat entry at
-    all. When that happens, re-extract the playlist fully (non-flat)
-    once and use those URLs instead; any entry still missing a URL
-    after that is reported as ``None`` and fails individually at
-    download time rather than being silently skipped or guessed at.
-    """
-    if not target.is_playlist:
-        return [original_url]
-
-    urls: List[Optional[str]] = [entry_download_url(video.raw) for video in target.videos]
-    if None not in urls:
-        return urls
-
-    try:
-        full_target = extract_target(original_url, flat=False)
-    except DownloadAppError:
-        return urls
-
-    full_urls = [entry_download_url(video.raw) for video in full_target.videos]
-    if len(full_urls) != len(urls):
-        return urls
-    return [full or flat for full, flat in zip(full_urls, urls)]
 
 
 # --------------------------------------------------------------------------
 # Entry points
 # --------------------------------------------------------------------------
-
-def _ladder_menu() -> List[QualityOption]:
-    """The fixed QUALITY_LADDER rendered as a QualityOption menu.
-
-    Used for playlists, where formats aren't known upfront (yt-dlp's
-    flat playlist extraction doesn't resolve each entry's formats) --
-    unlike a single video, there's no real format list to build a menu
-    from yet, so this is the best available approximation up front.
-    """
-    return [
-        QualityOption(key=label, label=display, height=QualityChoice(label=label).height)
-        for label, display in QUALITY_LADDER
-    ]
-
 
 def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
     print_header(APP_TITLE)
@@ -425,19 +349,13 @@ def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
 
     logger = setup_logging()
     try:
-        target = extract_target(url)
+        analysis = analyze(url)
     except DownloadAppError as exc:
         print(f"\nERROR:\n{exc}")
-        logger.error("Extraction failed for %s: %s", url, exc)
+        logger.error("Analysis failed for %s: %s", url, exc)
         return 1
 
-    if target.is_playlist:
-        menu = _ladder_menu()
-    else:
-        formats = target.formats or fetch_formats_for_video(url)
-        menu = build_quality_menu(formats)
-
-    quality = prompt_quality(menu)
+    quality = prompt_quality(analysis.quality_menu)
     filename_mode, filename_pattern = prompt_filename_mode()
     destination = prompt_destination_folder(default=config.download_folder or None)
     existing_behavior = prompt_existing_file_behavior(default=config.existing_file_behavior)
@@ -458,7 +376,7 @@ def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
         filename_pattern=filename_pattern,
         existing_file_behavior=existing_behavior,
         interactive=True,
-        target=target,
+        analysis=analysis,
     )
 
 
