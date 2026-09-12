@@ -144,6 +144,13 @@ class TestJobCreation(WebTestCase):
         # verify it never escapes by checking the job actually runs
         # inside self.root rather than asserting a 400 here.
         self.assertEqual(resp.status_code, 202)
+        job_id = resp.get_json()["job_id"]
+        # Wait for the background download to finish before the test
+        # (and its TemporaryDirectory) tears down, or the worker thread
+        # can race the directory removal.
+        self.assertTrue(
+            _wait_until(lambda: self.job_manager.get(job_id).state.value == "completed")
+        )
 
     @patch("web.routes.analyze")
     def test_absolute_subfolder_rejected(self, mock_analyze):
@@ -198,6 +205,156 @@ class TestJobCreation(WebTestCase):
         self.assertIn("qualities", resp.get_json())
 
 
+class TestManualDestinationPath(WebTestCase):
+    @patch("web.routes.analyze")
+    def test_destination_path_bypasses_the_configured_root(self, mock_analyze):
+        mock_analyze.return_value = _fake_analysis()
+        with tempfile.TemporaryDirectory() as elsewhere:
+            resp = self.post_json(
+                "/api/jobs",
+                {
+                    "url": "https://www.youtube.com/watch?v=abc",
+                    "quality": "best",
+                    "destination_path": elsewhere,
+                },
+            )
+            self.assertEqual(resp.status_code, 202)
+            job_id = resp.get_json()["job_id"]
+            self.assertTrue(
+                _wait_until(lambda: self.job_manager.get(job_id).state.value == "completed")
+            )
+            output_path = self.job_manager.get(job_id).result.results[0].output_path
+            # Landed under the manually-specified folder, NOT under
+            # self.root -- this is the whole point of destination_path.
+            self.assertTrue(str(output_path).startswith(str(Path(elsewhere).resolve())))
+            self.assertFalse(str(output_path).startswith(str(self.root.resolve())))
+
+    @patch("web.routes.analyze")
+    def test_empty_destination_path_falls_back_to_subfolder_mode(self, mock_analyze):
+        mock_analyze.return_value = _fake_analysis()
+        resp = self.post_json(
+            "/api/jobs",
+            {
+                "url": "https://www.youtube.com/watch?v=abc",
+                "quality": "best",
+                "destination_path": "   ",
+                "subfolder": "music",
+            },
+        )
+        self.assertEqual(resp.status_code, 202)
+        job_id = resp.get_json()["job_id"]
+        self.assertTrue(
+            _wait_until(lambda: self.job_manager.get(job_id).state.value == "completed")
+        )
+        output_path = self.job_manager.get(job_id).result.results[0].output_path
+        self.assertTrue(str(output_path).startswith(str((self.root / "music").resolve())))
+
+
+class TestSettingsEndpoint(WebTestCase):
+    def test_settings_include_download_root(self):
+        resp = self.get("/api/settings")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["download_root"], str(self.root))
+        self.assertIn("quality", body)
+        self.assertIn("concurrency", body)
+
+
+class TestBrowseEndpoint(WebTestCase):
+    def test_browse_lists_subdirectories(self):
+        (self.root / "alpha").mkdir()
+        (self.root / "beta").mkdir()
+        (self.root / "not_a_dir.txt").write_text("x")
+
+        resp = self.get(f"/api/browse?path={self.root}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["path"], str(self.root.resolve()))
+        self.assertEqual(sorted(body["directories"]), ["alpha", "beta"])
+        self.assertEqual(body["parent"], str(self.root.resolve().parent))
+
+    def test_browse_defaults_to_home_when_no_path_given(self):
+        resp = self.get("/api/browse")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["path"], str(Path.home().resolve()))
+
+    def test_browse_nonexistent_path_404(self):
+        resp = self.get(f"/api/browse?path={self.root}/does-not-exist")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_browse_file_not_directory_400(self):
+        f = self.root / "afile.txt"
+        f.write_text("x")
+        resp = self.get(f"/api/browse?path={f}")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_browse_mkdir_creates_folder(self):
+        resp = self.post_json("/api/browse/mkdir", {"path": str(self.root), "name": "New Folder"})
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue((self.root / "New Folder").is_dir())
+
+    def test_browse_mkdir_sanitizes_name(self):
+        resp = self.post_json("/api/browse/mkdir", {"path": str(self.root), "name": "a/b:c"})
+        self.assertEqual(resp.status_code, 201)
+        created = Path(resp.get_json()["path"])
+        self.assertTrue(created.is_dir())
+        self.assertTrue(created.parent == self.root.resolve())
+
+    def test_browse_mkdir_missing_fields_400(self):
+        resp = self.post_json("/api/browse/mkdir", {"path": str(self.root)})
+        self.assertEqual(resp.status_code, 400)
+
+
+class TestConflictResolutionEndpoint(WebTestCase):
+    @patch("web.routes.analyze")
+    def test_resolve_unknown_job_returns_409(self, mock_analyze):
+        resp = self.post_json("/api/jobs/does-not-exist/resolve", {"action": "skip"})
+        self.assertEqual(resp.status_code, 409)
+
+    @patch("web.routes.analyze")
+    def test_full_ask_flow_via_http(self, mock_analyze):
+        mock_analyze.return_value = _fake_analysis()
+        # This test uses its own JobManager (not self.job_manager) so
+        # it can inject conflict_indices on the downloader factory.
+        from functools import partial
+
+        manager = JobManager(downloader_factory=partial(FakeDownloader, conflict_indices={1}))
+        app = create_app(
+            download_root=self.root,
+            config=AppConfig(),
+            host="127.0.0.1",
+            port=8765,
+            job_manager=manager,
+        )
+        app.testing = True
+        client = app.test_client()
+
+        resp = client.post(
+            "/api/jobs",
+            data=json.dumps({"url": "https://www.youtube.com/watch?v=abc", "quality": "best", "existing_file_behavior": "ask"}),
+            content_type="application/json",
+            base_url=BASE_URL,
+        )
+        self.assertEqual(resp.status_code, 202)
+        job_id = resp.get_json()["job_id"]
+
+        self.assertTrue(_wait_until(lambda: manager.get(job_id).pending_conflict is not None))
+
+        snap = client.get(f"/api/jobs/{job_id}", base_url=BASE_URL).get_json()
+        self.assertIsNotNone(snap["pending_conflict"])
+
+        resolve_resp = client.post(
+            f"/api/jobs/{job_id}/resolve",
+            data=json.dumps({"action": "overwrite"}),
+            content_type="application/json",
+            base_url=BASE_URL,
+        )
+        self.assertEqual(resolve_resp.status_code, 202)
+
+        self.assertTrue(_wait_until(lambda: manager.get(job_id).state.value == "completed"))
+        self.assertEqual(manager.get(job_id).result.downloaded, 1)
+
+
 class TestJobEndpoints(WebTestCase):
     def test_get_unknown_job_404(self):
         resp = self.get("/api/jobs/does-not-exist")
@@ -214,10 +371,13 @@ class TestFileServing(WebTestCase):
         self.assertEqual(resp.status_code, 404)
 
     @patch("web.routes.analyze")
-    def test_file_outside_root_is_rejected_even_if_stored(self, mock_analyze):
-        # Even if a job's stored output_path somehow pointed outside
-        # the download root, the file-serving endpoint must refuse it
-        # rather than trusting a previously-computed path.
+    def test_file_outside_configured_root_is_still_served(self, mock_analyze):
+        # A job's destination is no longer confined to the configured
+        # download root (destination_path/the folder browser can point
+        # anywhere) -- serving a completed job's own output_path must
+        # work regardless of whether it happens to live under that
+        # root, since job id + index are never client-supplied at
+        # request time (see web/routes.py's module docstring).
         mock_analyze.return_value = _fake_analysis()
         resp = self.post_json(
             "/api/jobs", {"url": "https://www.youtube.com/watch?v=abc", "quality": "best"}
@@ -228,8 +388,32 @@ class TestFileServing(WebTestCase):
             _wait_until(lambda: self.job_manager.get(job_id).state.value == "completed")
         )
 
+        # Point the stored result somewhere outside self.root, as
+        # destination_path legitimately can.
+        outside = self.root.parent / f"outside-{job_id}.mp4"
+        outside.write_bytes(b"content from outside the configured root")
         job = self.job_manager.get(job_id)
-        job.result.results[0].output_path = Path("/etc/passwd")
+        job.result.results[0].output_path = outside
+        try:
+            r = self.get(f"/api/jobs/{job_id}/files/1")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.data, b"content from outside the configured root")
+        finally:
+            outside.unlink(missing_ok=True)
+
+    @patch("web.routes.analyze")
+    def test_nonexistent_stored_file_returns_404(self, mock_analyze):
+        mock_analyze.return_value = _fake_analysis()
+        resp = self.post_json(
+            "/api/jobs", {"url": "https://www.youtube.com/watch?v=abc", "quality": "best"}
+        )
+        job_id = resp.get_json()["job_id"]
+        self.assertTrue(
+            _wait_until(lambda: self.job_manager.get(job_id).state.value == "completed")
+        )
+
+        job = self.job_manager.get(job_id)
+        job.result.results[0].output_path = self.root / "this-file-was-never-written.mp4"
 
         r = self.get(f"/api/jobs/{job_id}/files/1")
         self.assertEqual(r.status_code, 404)

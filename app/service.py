@@ -227,6 +227,18 @@ def plan(request: DownloadRequest, analysis: AnalyzeResult) -> RunPlan:
 
     metadatas = [{"title": v.title, "uploader": v.uploader} for v in analysis.videos]
 
+    # "concurrency" means playlist items in parallel; a single video is
+    # always exactly one item, so force it to 1 regardless of what was
+    # requested rather than spinning up an unused thread pool for it.
+    concurrency = max(1, min(8, request.concurrency)) if analysis.is_playlist else 1
+    if request.existing_file_behavior == "ask":
+        # A caller offering interactive "ask" (app.jobs.Job tracks
+        # exactly one pending conflict at a time) can only safely
+        # surface one conflict at once -- two items hitting a conflict
+        # concurrently would race for the same slot. Skip/overwrite
+        # have no such restriction.
+        concurrency = 1
+
     return RunPlan(
         quality=quality,
         destination=request.destination,
@@ -239,11 +251,7 @@ def plan(request: DownloadRequest, analysis: AnalyzeResult) -> RunPlan:
         title=analysis.title,
         is_playlist=analysis.is_playlist,
         video_count=len(analysis.videos),
-        # "concurrency" means playlist items in parallel; a single video
-        # is always exactly one item, so force it to 1 regardless of
-        # what was requested rather than spinning up an unused thread
-        # pool for it.
-        concurrency=max(1, min(8, request.concurrency)) if analysis.is_playlist else 1,
+        concurrency=concurrency,
         concurrent_fragments=max(1, min(8, request.concurrent_fragments)),
     )
 

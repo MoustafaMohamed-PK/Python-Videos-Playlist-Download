@@ -2,6 +2,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from functools import partial
 from pathlib import Path
 
@@ -13,13 +14,18 @@ from app.service import RunPlan
 from tests.fakes import FakeDownloader
 
 
-def _plan(destination: Path, video_count: int = 2, title: str = "Test Job") -> RunPlan:
+def _plan(
+    destination: Path,
+    video_count: int = 2,
+    title: str = "Test Job",
+    existing_file_behavior: str = "skip",
+) -> RunPlan:
     return RunPlan(
         quality=QualityChoice(label="best"),
         destination=destination,
         filename_mode="original",
         filename_pattern=None,
-        existing_file_behavior="skip",
+        existing_file_behavior=existing_file_behavior,
         prefer_mp4=True,
         video_urls=[f"https://example.com/{i}" for i in range(video_count)],
         metadatas=[{"title": f"item{i}", "uploader": "x"} for i in range(video_count)],
@@ -175,6 +181,86 @@ class TestAnalyzeCache(unittest.TestCase):
 
         self.assertIsNone(manager.cached_analysis("https://example.com/v"))
         self.assertNotIn("https://example.com/v", manager._analyze_cache)
+
+
+class TestJobConflicts(unittest.TestCase):
+    def test_pending_conflict_appears_in_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = JobManager(downloader_factory=partial(FakeDownloader, conflict_indices={1}))
+            job_id = manager.submit(_plan(Path(tmp), video_count=1, existing_file_behavior="ask"))
+
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).pending_conflict is not None))
+            snap = manager.get(job_id).snapshot()
+            self.assertIn("path", snap["pending_conflict"])
+            self.assertEqual(snap["state"], "running")
+
+            # Must resolve before the test ends: an unanswered "ask"
+            # blocks its worker thread for CONFLICT_TIMEOUT_SECONDS
+            # (600s), and ThreadPoolExecutor's atexit handler waits for
+            # every submitted job across every JobManager to finish
+            # before the interpreter can exit -- leaving this hanging
+            # would stall the whole test process at shutdown, not just
+            # this test.
+            manager.resolve_conflict(job_id, "skip")
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).state == JobState.COMPLETED))
+
+    def test_resolve_skip_marks_item_skipped_and_job_completes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = JobManager(downloader_factory=partial(FakeDownloader, conflict_indices={1}))
+            job_id = manager.submit(_plan(Path(tmp), video_count=1, existing_file_behavior="ask"))
+
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).pending_conflict is not None))
+            self.assertTrue(manager.resolve_conflict(job_id, "skip"))
+
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).state == JobState.COMPLETED))
+            job = manager.get(job_id)
+            self.assertIsNone(job.pending_conflict)
+            self.assertEqual(job.result.skipped, 1)
+            self.assertEqual(job.result.downloaded, 0)
+
+    def test_resolve_overwrite_downloads_the_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = JobManager(downloader_factory=partial(FakeDownloader, conflict_indices={1}))
+            job_id = manager.submit(_plan(Path(tmp), video_count=1, existing_file_behavior="ask"))
+
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).pending_conflict is not None))
+            self.assertTrue(manager.resolve_conflict(job_id, "overwrite"))
+
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).state == JobState.COMPLETED))
+            job = manager.get(job_id)
+            self.assertEqual(job.result.downloaded, 1)
+            self.assertEqual(job.result.skipped, 0)
+
+    def test_resolve_unknown_job_returns_false(self):
+        manager = JobManager(downloader_factory=FakeDownloader)
+        self.assertFalse(manager.resolve_conflict("does-not-exist", "skip"))
+
+    def test_resolve_with_no_pending_conflict_returns_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = JobManager(downloader_factory=FakeDownloader)  # no conflicts configured
+            job_id = manager.submit(_plan(Path(tmp)))
+            _wait_until(lambda: manager.get(job_id).state == JobState.COMPLETED)
+            self.assertFalse(manager.resolve_conflict(job_id, "skip"))
+
+    def test_resolve_rejects_invalid_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = JobManager(downloader_factory=partial(FakeDownloader, conflict_indices={1}))
+            job_id = manager.submit(_plan(Path(tmp), video_count=1, existing_file_behavior="ask"))
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).pending_conflict is not None))
+            self.assertFalse(manager.resolve_conflict(job_id, "delete_everything"))
+            # The job is still waiting -- the bad action didn't consume the slot.
+            self.assertIsNotNone(manager.get(job_id).pending_conflict)
+            manager.resolve_conflict(job_id, "skip")  # let it finish for cleanup
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).state == JobState.COMPLETED))
+
+    def test_unanswered_conflict_times_out_to_skip(self):
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch("app.jobs.CONFLICT_TIMEOUT_SECONDS", 0.05):
+            manager = JobManager(downloader_factory=partial(FakeDownloader, conflict_indices={1}))
+            job_id = manager.submit(_plan(Path(tmp), video_count=1, existing_file_behavior="ask"))
+
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).state == JobState.COMPLETED, timeout=2))
+            job = manager.get(job_id)
+            self.assertEqual(job.result.skipped, 1)
 
 
 if __name__ == "__main__":

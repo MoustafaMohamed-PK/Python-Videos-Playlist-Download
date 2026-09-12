@@ -241,7 +241,14 @@ was actually downloaded — not assumed to be `.mp4`), choose:
 
 - **Skip** — leave the existing file alone (default).
 - **Overwrite** — replace it.
-- **Ask** — you're prompted for each conflicting file (CLI only).
+- **Ask** — you're prompted for each conflicting file. In the CLI this
+  blocks the terminal until you answer; in the web UI it pauses just
+  that item, shows a prompt on its job card ("skip" or "overwrite"),
+  and resumes once you click one. If a web prompt goes unanswered for
+  10 minutes it defaults to skip rather than waiting forever. To avoid
+  two conflicts racing for the same prompt, a playlist job using "ask"
+  always downloads one item at a time regardless of the concurrency
+  setting.
 
 ## Resuming interrupted downloads
 
@@ -257,13 +264,16 @@ python webmain.py --root ~/Videos --port 9000
 ```
 
 Paste a URL, review the title/thumbnail/duration/site and the real
-quality options, pick a subfolder and naming mode, and start the
-download. Progress streams live (overall and, for a playlist, each
-item), and finished files are downloaded straight from the page.
-Reloading the page picks up any job still running or already finished.
+quality options, and pick where it goes: type a path directly, or
+click **Browse…** to navigate the machine's folders (with a "new
+folder" option) from a picker — the destination field starts pre-filled
+with the configured download root but isn't limited to it. Progress
+streams live (overall and, for a playlist, each item), and finished
+files are downloaded straight from the page. Reloading the page picks
+up any job still running or already finished.
 
 `--host`/`--port`/`--root`/`--config` mirror the CLI's `--config` and
-let you change the bind address, port, and download root. See
+let you change the bind address, port, and default download root. See
 **Security** below before binding anywhere other than `127.0.0.1`.
 
 ## Configuration
@@ -287,8 +297,11 @@ the shape) next to `main.py`, shared by both the CLI and the web UI:
 `concurrency` is how many playlist items download at once (1-8).
 `concurrent_fragments` is yt-dlp's own within-one-item DASH/HLS
 fragment parallelism, unrelated to playlist-level concurrency.
-`web_download_root` is the base directory the web UI is confined to
-(falls back to `download_folder`, then `./downloads`, if unset).
+`web_download_root` pre-fills the web UI's destination field and is
+where a relative "subfolder" (the API's fallback when no explicit path
+is given) resolves against — not a hard boundary the web UI enforces;
+see **Security** below. Falls back to `download_folder`, then
+`./downloads`, if unset.
 
 No cookies, passwords, or authentication tokens are ever stored in this
 file.
@@ -305,30 +318,42 @@ this app is designed and hardened around:
   for LAN access) is an explicit opt-in that prints a warning at
   startup and is not a supported, hardened configuration — there's no
   authentication layer to add on top of it.
-- **The browser can never specify an absolute path.** The web UI only
-  accepts a "subfolder" string, confined to the configured download
-  root by `app/paths.py::resolve_within`: absolute paths and
-  backslashes are rejected, `..` segments are dropped rather than
-  honored (so an attempt to climb out just lands deeper inside the
-  root instead), and the check happens after resolving symlinks so an
-  in-tree symlink can't be used to escape it either.
-- **Files are served by job + index, never by path** — the download
-  endpoint looks up a completed result and re-validates it's still
-  inside the download root before sending it, rather than trusting a
-  client-supplied filename.
+- **The browser can read and write anywhere this OS user can.** By
+  design, matching what the CLI already lets you type: the destination
+  field accepts any path, and the folder browser (`/api/browse`) can
+  navigate and create directories anywhere on the machine, not just
+  under a configured root. There is no per-request confinement here —
+  this is a deliberate tradeoff for a single-user, localhost-only tool
+  that wants full filesystem access like a desktop app would, not a
+  gap to be fixed. It relies entirely on the network-level protections
+  below (binding to localhost, the Host check, the JSON-only check) to
+  keep that access reachable only from this machine.
+- **Files are served by job id + index, never by a client-supplied
+  path.** The download endpoint looks up a completed job's own result
+  by index; the path it serves was produced exclusively by this app's
+  own `Downloader` while running that job (addressed only by an
+  unguessable server-generated job id), never taken from a request
+  parameter at serve time — so a client can retrieve a finished
+  download regardless of which folder it landed in, without being able
+  to name an arbitrary file to fetch.
 - **CSRF / DNS rebinding**: every mutating request must declare
   `Content-Type: application/json` (a plain HTML form can't set that,
   and setting it from cross-origin JavaScript triggers a CORS
   preflight this server never answers, so the browser blocks the
   actual request), and the `Host` header must match the server's own
-  bind address. Together these block both a classic form-based
-  CSRF attempt and DNS rebinding from another site the browser has
-  open.
+  bind address. Given the filesystem access above, these two checks
+  are what actually stands between "only this machine can use it" and
+  "any page open in this machine's browser can silently trigger
+  downloads and directory listings" — treat them as load-bearing, not
+  incidental.
 - **This app is an arbitrary-URL fetcher by design** — that's the
   feature, not a bug to patch over with a domain allowlist (which
   would defeat the point of supporting "any site yt-dlp knows"). If you
   ever bind this somewhere other than `127.0.0.1`, understand that
-  tradeoff explicitly.
+  tradeoff explicitly — combined with unconfined filesystem access,
+  binding beyond localhost means anyone who can reach the port can
+  fetch arbitrary URLs and read/write arbitrary files this OS user can
+  touch.
 - No `eval()`/`exec()`, no shell string construction (yt-dlp invokes
   FFmpeg itself via an argv list, and this app adds no subprocess calls
   of its own), no SSL verification disabling.

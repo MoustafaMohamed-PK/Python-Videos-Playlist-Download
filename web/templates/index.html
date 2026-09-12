@@ -51,8 +51,19 @@
           </select>
         </div>
         <div class="field">
-          <label for="subfolder-input">Subfolder (optional)</label>
-          <input id="subfolder-input" type="text" placeholder="e.g. music/2026" autocomplete="off">
+          <label for="destination-input">Destination folder</label>
+          <div class="row">
+            <input id="destination-input" type="text" placeholder="/path/to/folder" autocomplete="off">
+            <button type="button" id="browse-btn">Browse…</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="existing-select">If a file already exists</label>
+          <select id="existing-select">
+            <option value="skip">Skip</option>
+            <option value="overwrite">Overwrite</option>
+            <option value="ask">Ask me</option>
+          </select>
         </div>
         <div class="field">
           <label for="concurrency-input">Playlist items in parallel</label>
@@ -62,6 +73,21 @@
       </form>
       <p class="error" id="job-error" hidden></p>
     </section>
+
+    <dialog class="card browse-panel" id="browse-panel">
+      <div class="browse-header">
+        <h2>Choose a folder</h2>
+        <button type="button" class="icon-btn" id="browse-close">✕</button>
+      </div>
+      <nav class="breadcrumb" id="browse-breadcrumb"></nav>
+      <p class="error" id="browse-error" hidden></p>
+      <ul class="browse-list" id="browse-list"></ul>
+      <form class="row new-folder-row" id="new-folder-form">
+        <input type="text" id="new-folder-name" placeholder="New folder name" autocomplete="off">
+        <button type="submit">Create</button>
+      </form>
+      <button type="button" id="browse-select-btn" class="primary-wide">Use this folder</button>
+    </dialog>
 
     <section class="card" id="jobs-card">
       <h2>Jobs</h2>
@@ -82,6 +108,13 @@
       </div>
       <p class="job-stats"></p>
       <p class="job-error error" hidden></p>
+      <div class="job-conflict" hidden>
+        <p class="job-conflict-text"></p>
+        <div class="row">
+          <button type="button" class="job-conflict-skip">Skip</button>
+          <button type="button" class="job-conflict-overwrite">Overwrite</button>
+        </div>
+      </div>
       <ul class="job-files"></ul>
       <button class="job-cancel" type="button">Cancel</button>
     </article>

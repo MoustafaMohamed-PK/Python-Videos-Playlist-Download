@@ -39,6 +39,11 @@ from app.service import AnalyzeResult, DownloaderFactory, RunPlan, execute
 
 ANALYZE_CACHE_TTL_SECONDS = 300
 
+# How long an "ask" conflict waits for a browser response before
+# defaulting to "skip" (the safer of the two choices) so a forgotten
+# tab can never wedge a job open forever.
+CONFLICT_TIMEOUT_SECONDS = 600
+
 
 class JobState(str, Enum):
     QUEUED = "queued"
@@ -58,6 +63,12 @@ class Job:
     result: Optional[DownloadRunResult] = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     aggregator: Optional[ProgressAggregator] = None
+    # Set while a conflict is awaiting a browser response ("skip" or
+    # "overwrite" for an already-existing file); consumed by
+    # JobManager.resolve_conflict(). Only one conflict is tracked at a
+    # time per job -- see the concurrency note in app/service.py::plan.
+    pending_conflict: Optional[Dict[str, Any]] = None
+    conflict_queue: Optional[Queue] = None
 
     def snapshot(self) -> Dict[str, Any]:
         prog = self.aggregator.snapshot() if self.aggregator else None
@@ -69,6 +80,7 @@ class Job:
             "video_count": self.plan.video_count,
             "created_at": self.created_at,
             "error": self.error,
+            "pending_conflict": self.pending_conflict,
             "progress": (
                 {
                     "completed": prog.completed,
@@ -173,11 +185,34 @@ class JobManager:
             job.aggregator.update(event)
             self._publish(job.snapshot())
 
+        def ask_overwrite_callback(path_str: str) -> str:
+            # Called synchronously from the download worker thread when
+            # an item's target file already exists and the job asked
+            # for interactive "ask" behavior. Blocks that thread (never
+            # the whole server -- each job runs on its own worker) until
+            # resolve_conflict() delivers an answer via the queue, or
+            # the timeout elapses.
+            answer_queue: "Queue[str]" = Queue(maxsize=1)
+            with self._lock:
+                job.pending_conflict = {"path": path_str}
+                job.conflict_queue = answer_queue
+            self._publish(job.snapshot())
+            try:
+                answer = answer_queue.get(timeout=CONFLICT_TIMEOUT_SECONDS)
+            except Empty:
+                answer = "skip"
+            with self._lock:
+                job.pending_conflict = None
+                job.conflict_queue = None
+            self._publish(job.snapshot())
+            return answer
+
         try:
             result = execute(
                 job.plan,
                 progress_callback=progress_callback,
                 cancel_event=job.cancel_event,
+                ask_overwrite_callback=ask_overwrite_callback,
                 downloader_factory=self._downloader_factory,
             )
             with self._lock:
@@ -203,6 +238,27 @@ class JobManager:
             return False
         job.cancel_event.set()
         return True
+
+    def resolve_conflict(self, job_id: str, action: str) -> bool:
+        """Answer a job's pending existing-file conflict.
+
+        Returns False if the job doesn't exist, isn't currently
+        waiting on a conflict, or ``action`` isn't "skip"/"overwrite".
+        """
+        if action not in ("skip", "overwrite"):
+            return False
+        job = self.get(job_id)
+        if job is None:
+            return False
+        with self._lock:
+            queue = job.conflict_queue
+        if queue is None:
+            return False
+        try:
+            queue.put_nowait(action)
+            return True
+        except Full:
+            return False
 
     # -- progress fan-out (SSE) ----------------------------------------
 

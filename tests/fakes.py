@@ -77,6 +77,7 @@ class FakeDownloader:
         concurrent_fragments: int = 4,
         cancel_event=None,
         delay: float = 0.0,
+        conflict_indices: frozenset = frozenset(),
     ):
         self.destination = destination
         self.quality = quality
@@ -92,6 +93,11 @@ class FakeDownloader:
         # observe an in-progress state (job manager cancellation,
         # snapshot polling) instead of a job that finishes instantly.
         self.delay = delay
+        # 1-based item indices to simulate as "target file already
+        # exists" -- exercises the same existing_file_behavior /
+        # ask_overwrite_callback contract as the real Downloader,
+        # without needing a real pre-existing file on disk.
+        self.conflict_indices = conflict_indices
 
     def download_many(
         self,
@@ -114,6 +120,24 @@ class FakeDownloader:
                 )
                 run_result.failed += 1
                 continue
+
+            if i in self.conflict_indices:
+                fake_existing_path = self.destination / f"{title}.mp4"
+                behavior = self.existing_file_behavior
+                if behavior == "ask" and self.ask_overwrite_callback:
+                    behavior = self.ask_overwrite_callback(str(fake_existing_path))
+                if behavior == "skip":
+                    run_result.results.append(
+                        VideoResult(
+                            index=i, title=title, success=True, skipped=True,
+                            output_path=fake_existing_path,
+                        )
+                    )
+                    run_result.skipped += 1
+                    continue
+                # "overwrite" (or any other value, defensively) falls
+                # through to a normal download below, same as the real
+                # Downloader.
 
             if self.progress_callback:
                 self.progress_callback(

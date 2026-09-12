@@ -17,7 +17,8 @@
   const jobForm = document.getElementById("job-form");
   const qualitySelect = document.getElementById("quality-select");
   const namingSelect = document.getElementById("naming-select");
-  const subfolderInput = document.getElementById("subfolder-input");
+  const destinationInput = document.getElementById("destination-input");
+  const existingSelect = document.getElementById("existing-select");
   const concurrencyInput = document.getElementById("concurrency-input");
   const startBtn = document.getElementById("start-btn");
   const jobError = document.getElementById("job-error");
@@ -26,7 +27,18 @@
   const jobsEmpty = document.getElementById("jobs-empty");
   const jobCardTemplate = document.getElementById("job-card-template");
 
+  const browseBtn = document.getElementById("browse-btn");
+  const browsePanel = document.getElementById("browse-panel");
+  const browseClose = document.getElementById("browse-close");
+  const browseBreadcrumb = document.getElementById("browse-breadcrumb");
+  const browseList = document.getElementById("browse-list");
+  const browseError = document.getElementById("browse-error");
+  const browseSelectBtn = document.getElementById("browse-select-btn");
+  const newFolderForm = document.getElementById("new-folder-form");
+  const newFolderName = document.getElementById("new-folder-name");
+
   let currentUrl = null;
+  let browseCurrentPath = null;
   const jobCards = new Map(); // job_id -> DOM element
 
   function jsonFetch(url, options = {}) {
@@ -151,7 +163,8 @@
           url: currentUrl,
           quality: qualitySelect.value,
           filename_mode: namingSelect.value,
-          subfolder: subfolderInput.value.trim(),
+          destination_path: destinationInput.value.trim(),
+          existing_file_behavior: existingSelect.value,
           concurrency: Number(concurrencyInput.value) || 1,
         }),
       });
@@ -178,6 +191,18 @@
     card.dataset.jobId = jobId;
     card.querySelector(".job-cancel").addEventListener("click", () => {
       jsonFetch(`/api/jobs/${jobId}/cancel`, { method: "POST", body: "{}" }).catch(() => {});
+    });
+    card.querySelector(".job-conflict-skip").addEventListener("click", () => {
+      jsonFetch(`/api/jobs/${jobId}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ action: "skip" }),
+      }).catch(() => {});
+    });
+    card.querySelector(".job-conflict-overwrite").addEventListener("click", () => {
+      jsonFetch(`/api/jobs/${jobId}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ action: "overwrite" }),
+      }).catch(() => {});
     });
 
     jobsEmpty.hidden = true;
@@ -217,6 +242,15 @@
       errorEl.hidden = true;
     }
 
+    const conflictEl = card.querySelector(".job-conflict");
+    if (job.pending_conflict) {
+      conflictEl.querySelector(".job-conflict-text").textContent =
+        `Already exists: ${job.pending_conflict.path} — skip it, or overwrite?`;
+      conflictEl.hidden = false;
+    } else {
+      conflictEl.hidden = true;
+    }
+
     const filesEl = card.querySelector(".job-files");
     filesEl.innerHTML = "";
     for (const r of job.results || []) {
@@ -236,6 +270,114 @@
 
     const cancelBtn = card.querySelector(".job-cancel");
     cancelBtn.hidden = job.state !== "queued" && job.state !== "running";
+  }
+
+  // ---- Folder browser ----
+
+  function renderBreadcrumb(path) {
+    browseBreadcrumb.innerHTML = "";
+    const segments = path.split("/").filter(Boolean);
+    let acc = "";
+
+    const rootBtn = document.createElement("button");
+    rootBtn.type = "button";
+    rootBtn.textContent = "/";
+    rootBtn.addEventListener("click", () => loadBrowsePath("/"));
+    browseBreadcrumb.appendChild(rootBtn);
+
+    for (const seg of segments) {
+      acc += `/${seg}`;
+      const sep = document.createElement("span");
+      sep.className = "sep";
+      sep.textContent = "›";
+      browseBreadcrumb.appendChild(sep);
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = seg;
+      const target = acc;
+      btn.addEventListener("click", () => loadBrowsePath(target));
+      browseBreadcrumb.appendChild(btn);
+    }
+  }
+
+  async function loadBrowsePath(path) {
+    hideError(browseError);
+    try {
+      const data = await jsonFetch(`/api/browse?path=${encodeURIComponent(path)}`, {
+        method: "GET",
+      });
+      browseCurrentPath = data.path;
+      renderBreadcrumb(data.path);
+
+      browseList.innerHTML = "";
+      if (data.directories.length === 0) {
+        const li = document.createElement("li");
+        li.className = "empty-row";
+        li.textContent = "No subfolders here.";
+        browseList.appendChild(li);
+      } else {
+        for (const name of data.directories) {
+          const li = document.createElement("li");
+          li.textContent = `📁 ${name}`;
+          li.addEventListener("click", () => {
+            const sep = data.path.endsWith("/") ? "" : "/";
+            loadBrowsePath(`${data.path}${sep}${name}`);
+          });
+          browseList.appendChild(li);
+        }
+      }
+    } catch (err) {
+      showError(browseError, err.message);
+    }
+  }
+
+  browseBtn.addEventListener("click", () => {
+    browsePanel.showModal();
+    loadBrowsePath(destinationInput.value.trim() || "");
+  });
+
+  browseClose.addEventListener("click", () => browsePanel.close());
+
+  // Clicking the backdrop (a click landing on the <dialog> element
+  // itself, not one of its children) closes it, matching normal modal
+  // behavior -- <dialog> doesn't do this on its own.
+  browsePanel.addEventListener("click", (event) => {
+    if (event.target === browsePanel) browsePanel.close();
+  });
+
+  browseSelectBtn.addEventListener("click", () => {
+    if (browseCurrentPath) destinationInput.value = browseCurrentPath;
+    browsePanel.close();
+  });
+
+  newFolderForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = newFolderName.value.trim();
+    if (!name || !browseCurrentPath) return;
+    hideError(browseError);
+    try {
+      await jsonFetch("/api/browse/mkdir", {
+        method: "POST",
+        body: JSON.stringify({ path: browseCurrentPath, name }),
+      });
+      newFolderName.value = "";
+      loadBrowsePath(browseCurrentPath);
+    } catch (err) {
+      showError(browseError, err.message);
+    }
+  });
+
+  // ---- Prefill destination with the configured download root ----
+
+  async function loadSettings() {
+    try {
+      const settings = await jsonFetch("/api/settings", { method: "GET" });
+      if (settings.download_root) destinationInput.value = settings.download_root;
+      if (settings.concurrency) concurrencyInput.value = settings.concurrency;
+    } catch (_) {
+      /* best-effort */
+    }
   }
 
   // ---- Live updates: one shared SSE connection for the whole page ----
@@ -268,4 +410,5 @@
 
   connectEvents();
   loadExistingJobs();
+  loadSettings();
 })();

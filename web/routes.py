@@ -5,11 +5,26 @@ Responsible for:
     - Translating HTTP requests into calls on app.service (the same
       analyze/plan/execute pipeline the CLI uses) and app.jobs
       (background execution + progress).
-    - Confining every destination path to the configured download
-      root via app.paths.resolve_within -- the browser can supply a
-      "subfolder" string, never an absolute path.
+    - Resolving a destination two ways: a "subfolder" string confined
+      to the configured download root (app.paths.resolve_within), or a
+      "destination_path" the client supplies directly -- validated the
+      same way the CLI validates a typed path
+      (app.validators.validate_destination_path), but NOT confined to
+      any root. That second mode is a deliberate choice: this is a
+      single-user, localhost-only tool, and being able to pick any
+      folder on the machine (via the browse endpoints below, or by
+      typing a path) was requested explicitly, matching what the CLI
+      already allows. See README.md's Security section for the
+      tradeoff this implies for the file-serving endpoint below.
+    - Browsing the server's own filesystem (GET /api/browse, POST
+      /api/browse/mkdir) so the UI can offer a folder picker instead of
+      only a text field -- deliberately NOT confined to the download
+      root, for the same reason "destination_path" isn't.
     - Serving finished files back to the browser by job id + index,
       never by a client-supplied path.
+    - Relaying an "ask" existing-file conflict from a running job to
+      the browser and back (GET job snapshot carries
+      "pending_conflict"; POST /api/jobs/<id>/resolve answers it).
 
 Nothing here talks to yt-dlp directly; all of that stays in
 app.downloader/app.service, so this module and the CLI can never
@@ -26,11 +41,12 @@ from queue import Empty
 from flask import Blueprint, Response, current_app, jsonify, request, send_file
 
 from app.downloader import DownloadAppError
+from app.filename import sanitize_filename
 from app.jobs import JobManager
 from app.paths import resolve_within
 from app.service import DownloadRequest, QualityUnavailableError, analyze, plan
 from app.sites import match_extractor
-from app.validators import ValidationError
+from app.validators import ValidationError, validate_destination_path
 
 bp = Blueprint("api", __name__)
 
@@ -52,6 +68,13 @@ def index():
     from flask import render_template
 
     return render_template("index.html")
+
+
+@bp.get("/api/settings")
+def api_settings():
+    settings = dict(_default_settings())
+    settings["download_root"] = str(_download_root())
+    return jsonify(settings)
 
 
 @bp.post("/api/analyze")
@@ -118,10 +141,20 @@ def api_create_job():
             return jsonify(error=str(exc)), 400
         manager.cache_analysis(url, analysis)
 
-    try:
-        destination = resolve_within(_download_root(), data.get("subfolder"))
-    except ValidationError as exc:
-        return jsonify(error=str(exc)), 400
+    destination_path = (data.get("destination_path") or "").strip()
+    if destination_path:
+        # A directly-supplied path (typed, or picked via the browse
+        # endpoints below) -- validated like the CLI validates a typed
+        # path, but not confined to any root. See the module docstring.
+        try:
+            destination = validate_destination_path(destination_path)
+        except ValidationError as exc:
+            return jsonify(error=str(exc)), 400
+    else:
+        try:
+            destination = resolve_within(_download_root(), data.get("subfolder"))
+        except ValidationError as exc:
+            return jsonify(error=str(exc)), 400
 
     try:
         destination.mkdir(parents=True, exist_ok=True)
@@ -175,6 +208,15 @@ def api_cancel_job(job_id: str):
     return jsonify(cancelled=True), 202
 
 
+@bp.post("/api/jobs/<job_id>/resolve")
+def api_resolve_job_conflict(job_id: str):
+    data = request.get_json(silent=True) or {}
+    action = data.get("action")
+    if not _job_manager().resolve_conflict(job_id, action):
+        return jsonify(error="No pending conflict for this job, or an invalid action."), 409
+    return jsonify(resolved=True), 202
+
+
 @bp.get("/api/jobs/<job_id>/files/<int:index>")
 def api_get_job_file(job_id: str, index: int):
     job = _job_manager().get(job_id)
@@ -185,18 +227,80 @@ def api_get_job_file(job_id: str, index: int):
     if match is None or not match.success or match.output_path is None:
         return jsonify(error="File not found."), 404
 
-    # Re-validate against the download root even though this path was
-    # produced by our own Downloader -- never trust a stored path
-    # without re-checking it stays inside the root before serving it
-    # back over HTTP.
-    root = _download_root().resolve()
+    # NOT confined to the download root: since a job's destination can
+    # now be any path the user typed or browsed to (see the module
+    # docstring), a legitimate download can legitimately live outside
+    # it. This is still safe to serve because output_path was never
+    # client-supplied at request time -- it was produced exclusively
+    # by our own Downloader while running this exact job, addressed
+    # here only by an unguessable job id (a server-generated UUID) plus
+    # an index into that job's own completed results.
     resolved = Path(match.output_path).resolve()
-    if root != resolved and root not in resolved.parents:
-        return jsonify(error="File not found."), 404
     if not resolved.is_file():
         return jsonify(error="File not found."), 404
 
     return send_file(resolved, as_attachment=True, download_name=resolved.name)
+
+
+@bp.get("/api/browse")
+def api_browse():
+    """List subdirectories of a filesystem path, for the folder-picker UI.
+
+    Deliberately not confined to the download root -- matches
+    "destination_path" above. Defaults to the user's home directory
+    when no path is given, since that's a more useful starting point
+    than the filesystem root for picking a download folder.
+    """
+    raw_path = (request.args.get("path") or "").strip() or str(Path.home())
+    try:
+        target = Path(raw_path).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return jsonify(error="Invalid path."), 400
+
+    if not target.exists():
+        return jsonify(error="That path does not exist."), 404
+    if not target.is_dir():
+        return jsonify(error="That path is not a directory."), 400
+
+    directories = []
+    try:
+        for entry in target.iterdir():
+            try:
+                if entry.is_dir():
+                    directories.append(entry.name)
+            except OSError:
+                continue  # permission denied, broken symlink, etc. -- skip silently
+    except OSError as exc:
+        return jsonify(error=f"Could not list directory: {exc}"), 400
+    directories.sort(key=str.lower)
+
+    parent = str(target.parent) if target.parent != target else None
+    return jsonify(path=str(target), parent=parent, directories=directories)
+
+
+@bp.post("/api/browse/mkdir")
+def api_browse_mkdir():
+    data = request.get_json(silent=True) or {}
+    parent_str = (data.get("path") or "").strip()
+    name = (data.get("name") or "").strip()
+    if not parent_str or not name:
+        return jsonify(error="path and name are required."), 400
+
+    try:
+        parent = Path(parent_str).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return jsonify(error="Invalid path."), 400
+    if not parent.is_dir():
+        return jsonify(error="Parent is not a directory."), 400
+
+    safe_name = sanitize_filename(name)
+    new_dir = parent / safe_name
+    try:
+        new_dir.mkdir(parents=False, exist_ok=True)
+    except OSError as exc:
+        return jsonify(error=f"Could not create folder: {exc}"), 400
+
+    return jsonify(path=str(new_dir)), 201
 
 
 @bp.get("/api/events")
