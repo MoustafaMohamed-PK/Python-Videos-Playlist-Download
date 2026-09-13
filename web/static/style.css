@@ -112,6 +112,31 @@ button:disabled { opacity: 0.6; cursor: default; }
 #job-form { display: flex; flex-direction: column; gap: 14px; }
 #job-form .field { display: flex; flex-direction: column; }
 
+.subtitle-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+  color: var(--text);
+  margin-bottom: 0;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+}
+
+#subtitle-langs-input { margin-top: 6px; }
+.field .checkbox-row { margin-top: 8px; }
+
 .error {
   color: var(--danger);
   background: var(--danger-bg);
@@ -212,6 +237,7 @@ button:disabled { opacity: 0.6; cursor: default; }
 .job-files a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
 .job-files a:hover { text-decoration: underline; }
 .job-files .failed { color: var(--danger); font-size: 0.9rem; }
+.file-warning { color: var(--text-muted); font-size: 0.85rem; }
 
 .state-completed { color: var(--success); background: transparent; border: 1px solid var(--success); }
 .state-failed, .state-cancelled { color: var(--danger); background: transparent; border: 1px solid var(--danger); }

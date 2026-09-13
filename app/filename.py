@@ -172,6 +172,24 @@ def existing_outputs(destination: Path, stem: str) -> List[Path]:
     ]
 
 
+# Subtitle file extensions yt-dlp can produce (a language code precedes
+# this in the filename, e.g. "<stem>.en.srt") -- used by
+# existing_subtitle_outputs() the same way _MEDIA_EXTENSIONS is used by
+# existing_outputs(), for a subtitles-only download where there is no
+# media file to check for.
+_SUBTITLE_EXTENSIONS = {"srt", "vtt", "ass", "ssa", "sbv", "ttml"}
+
+
+def existing_subtitle_outputs(destination: Path, stem: str) -> List[Path]:
+    """Find already-downloaded subtitle file(s) for ``stem`` in ``destination``."""
+    pattern = _glob.escape(stem) + ".*"
+    return [
+        path
+        for path in sorted(destination.glob(pattern))
+        if path.is_file() and path.suffix.lower().lstrip(".") in _SUBTITLE_EXTENSIONS
+    ]
+
+
 def dedupe_path(path):
     """Return a non-colliding path by appending ' (2)', ' (3)', ... if needed.
 

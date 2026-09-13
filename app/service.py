@@ -48,6 +48,7 @@ from app.formats import (
     quality_is_available,
 )
 from app.sites import validate_media_url
+from app.subtitles import SubtitleOption, available_subtitle_options
 
 Extractor = Callable[..., ExtractedTarget]
 FormatsFetcher = Callable[[str], List[Dict[str, Any]]]
@@ -80,6 +81,11 @@ class AnalyzeResult:
     video_urls: List[Optional[str]]  # resolved per-item download URLs
     thumbnail: Optional[str] = None  # first video's thumbnail URL, if yt-dlp reported one
     warnings: List[str] = field(default_factory=list)
+    # Subtitle languages available to pick from. Only populated for a
+    # single video -- like `formats`, a playlist's per-item subtitle
+    # tracks aren't known from flat extraction, so a caller falls back
+    # to letting the user type language codes directly.
+    subtitle_menu: List[SubtitleOption] = field(default_factory=list)
 
 
 @dataclass
@@ -93,6 +99,8 @@ class DownloadRequest:
     existing_file_behavior: str = "skip"
     concurrency: int = 1  # playlist items downloaded in parallel
     concurrent_fragments: int = 4  # yt-dlp's own per-item fragment parallelism
+    subtitle_langs: List[str] = field(default_factory=list)  # empty = no subtitles
+    subtitles_only: bool = False  # skip video/audio entirely, download only subtitle_langs
 
 
 @dataclass
@@ -113,6 +121,8 @@ class RunPlan:
     concurrency: int
     concurrent_fragments: int
     thumbnail: Optional[str] = None
+    subtitle_langs: List[str] = field(default_factory=list)
+    subtitles_only: bool = False
 
 
 def _ladder_menu() -> List[QualityOption]:
@@ -179,10 +189,12 @@ def analyze(
         formats: List[Dict[str, Any]] = []
         quality_menu = _ladder_menu()
         video_urls = _resolve_playlist_urls(validated_url, target, extractor)
+        subtitle_menu: List[SubtitleOption] = []
     else:
         formats = target.formats or formats_fetcher(validated_url)
         quality_menu = build_quality_menu(formats)
         video_urls = [validated_url]
+        subtitle_menu = available_subtitle_options(target.videos[0].raw if target.videos else {})
 
     if target.is_playlist:
         title = target.playlist_title or "Untitled playlist"
@@ -203,6 +215,7 @@ def analyze(
         quality_menu=quality_menu,
         video_urls=video_urls,
         thumbnail=thumbnail,
+        subtitle_menu=subtitle_menu,
     )
 
 
@@ -224,7 +237,10 @@ def plan(request: DownloadRequest, analysis: AnalyzeResult) -> RunPlan:
     # today's YouTube-shaped default.
     prefer_mp4 = True
 
-    if not analysis.is_playlist:
+    if not analysis.is_playlist and not request.subtitles_only:
+        # Video/audio quality is irrelevant when only subtitles are
+        # being downloaded, so it's never validated (or used) in that
+        # mode -- see Downloader._build_ydl_opts.
         if not quality_is_available(quality, analysis.formats):
             raise QualityUnavailableError(
                 f"The selected {request.quality_label} quality is not available for this video.",
@@ -261,6 +277,8 @@ def plan(request: DownloadRequest, analysis: AnalyzeResult) -> RunPlan:
         concurrency=concurrency,
         concurrent_fragments=max(1, min(8, request.concurrent_fragments)),
         thumbnail=analysis.thumbnail,
+        subtitle_langs=request.subtitle_langs,
+        subtitles_only=request.subtitles_only,
     )
 
 
@@ -284,6 +302,8 @@ def execute(
         prefer_mp4=run_plan.prefer_mp4,
         concurrent_fragments=run_plan.concurrent_fragments,
         cancel_event=cancel_event,
+        subtitle_langs=run_plan.subtitle_langs,
+        subtitles_only=run_plan.subtitles_only,
     )
     return downloader.download_many(
         run_plan.video_urls, run_plan.metadatas, concurrency=run_plan.concurrency

@@ -29,6 +29,7 @@ from app.service import (
     plan,
 )
 from app.sites import validate_media_url
+from app.subtitles import SubtitleOption
 from app.utils import (
     ffmpeg_available,
     format_bytes,
@@ -95,6 +96,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Playlist items to download in parallel, 1-8 (default: from config, normally 3).",
     )
     parser.add_argument(
+        "--subtitles",
+        help=(
+            "Comma-separated subtitle language codes to download (e.g. 'en,es'). "
+            "Saved as sidecar .srt files alongside the video/audio, "
+            "unless --subtitles-only is also given."
+        ),
+    )
+    parser.add_argument(
+        "--subtitles-only",
+        action="store_true",
+        help="Download only the languages given via --subtitles, skipping video/audio entirely.",
+    )
+    parser.add_argument(
         "--config",
         help="Path to a config JSON file (default: ./config.json).",
     )
@@ -133,6 +147,52 @@ def prompt_quality(menu: List[QualityOption]) -> QualityChoice:
         print(f"{i}. {option.label}")
     choice = prompt_int_in_range("Choose quality: ", 1, len(menu))
     return QualityChoice(label=menu[choice - 1].key)
+
+
+def prompt_download_mode() -> str:
+    print("\nWhat would you like to download?")
+    print("1. Video/audio")
+    print("2. Video/audio + subtitles")
+    print("3. Subtitles only")
+    choice = prompt_int_in_range("Choose: ", 1, 3)
+    return {1: "media", 2: "media_with_subs", 3: "subtitles_only"}[choice]
+
+
+def prompt_subtitle_languages(menu: List[SubtitleOption]) -> List[str]:
+    """Prompt for one or more subtitle languages.
+
+    ``menu`` comes from :func:`app.subtitles.available_subtitle_options`
+    for a single video. It's empty for a playlist (per-item subtitle
+    tracks aren't known from flat extraction) -- in that case, fall
+    back to letting the user type language codes directly.
+    """
+    if not menu:
+        raw = input(
+            "\nEnter subtitle language code(s), comma-separated (e.g. en,es), "
+            "or leave blank for none: "
+        ).strip()
+        return [code.strip() for code in raw.split(",") if code.strip()]
+
+    print("\nAvailable subtitle languages:")
+    print("0. None")
+    for i, option in enumerate(menu, start=1):
+        print(f"{i}. {option.label}")
+    raw = input("Choose subtitle language(s) (comma-separated numbers) [0]: ").strip()
+    if not raw or raw == "0":
+        return []
+
+    selected: List[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            idx = int(part)
+        except ValueError:
+            continue
+        if 1 <= idx <= len(menu):
+            selected.append(menu[idx - 1].lang)
+    return selected
 
 
 def prompt_filename_mode() -> tuple[str, Optional[str]]:
@@ -298,6 +358,12 @@ def print_summary(run_result, target_kind: str, extra_title: Optional[str] = Non
         for r in failed:
             print(f"  - {r.title} ({r.error})")
 
+    warned = [r for r in run_result.results if r.warning]
+    if warned:
+        print("\nWarnings:")
+        for r in warned:
+            print(f"  - {r.title}: {r.warning}")
+
 
 # --------------------------------------------------------------------------
 # Core workflow (shared by interactive + CLI-argument modes)
@@ -314,6 +380,8 @@ def run_download_workflow(
     analysis: Optional[AnalyzeResult] = None,
     concurrency: int = 1,
     concurrent_fragments: int = 4,
+    subtitle_langs: Optional[List[str]] = None,
+    subtitles_only: bool = False,
 ) -> int:
     """Runs the full analyze -> plan -> confirm -> download -> summarize workflow.
 
@@ -341,6 +409,8 @@ def run_download_workflow(
         existing_file_behavior=existing_file_behavior,
         concurrency=concurrency,
         concurrent_fragments=concurrent_fragments,
+        subtitle_langs=subtitle_langs or [],
+        subtitles_only=subtitles_only,
     )
     try:
         run_plan = plan(request, analysis)
@@ -352,7 +422,7 @@ def run_download_workflow(
             print(f"  {option.label}")
         return 1
 
-    if not run_plan.quality.is_audio_only and not ffmpeg_available():
+    if not run_plan.subtitles_only and not run_plan.quality.is_audio_only and not ffmpeg_available():
         print(
             "\nNote: FFmpeg was not found on PATH. FFmpeg is required to merge "
             "separate video/audio streams. If the selected quality needs a "
@@ -365,7 +435,12 @@ def run_download_workflow(
     print(f"Title      : {run_plan.title}")
     if run_plan.is_playlist:
         print(f"Videos     : {run_plan.video_count}")
-    print(f"Quality    : {quality_label}")
+    if run_plan.subtitles_only:
+        print("Quality    : (subtitles only)")
+    else:
+        print(f"Quality    : {quality_label}")
+    if run_plan.subtitle_langs:
+        print(f"Subtitles  : {', '.join(run_plan.subtitle_langs)}")
     naming_display = filename_pattern if filename_mode == "pattern" else filename_mode
     print(f"Naming     : {naming_display}")
     print(f"Output     : {destination}")
@@ -408,14 +483,27 @@ def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
         logger.error("Analysis failed for %s: %s", url, exc)
         return 1
 
-    quality = prompt_quality(analysis.quality_menu)
+    mode = prompt_download_mode()
+    subtitles_only = mode == "subtitles_only"
+    subtitle_langs: List[str] = []
+    if mode in ("media_with_subs", "subtitles_only"):
+        subtitle_langs = prompt_subtitle_languages(analysis.subtitle_menu)
+        if subtitles_only and not subtitle_langs:
+            print("\nNo subtitle language selected -- nothing to download.")
+            return 1
+
+    quality = QualityChoice(label=config.quality)
+    if not subtitles_only:
+        quality = prompt_quality(analysis.quality_menu)
+
     filename_mode, filename_pattern = prompt_filename_mode()
     destination = prompt_destination_folder(default=config.download_folder or None)
     existing_behavior = prompt_existing_file_behavior(default=config.existing_file_behavior)
 
     # Persist choices as new defaults for next run.
     config.download_folder = str(destination)
-    config.quality = quality.label
+    if not subtitles_only:
+        config.quality = quality.label
     config.filename_mode = filename_mode
     config.filename_pattern = filename_pattern or config.filename_pattern
     config.existing_file_behavior = existing_behavior
@@ -432,6 +520,8 @@ def run_interactive(config: AppConfig, config_manager: ConfigManager) -> int:
         analysis=analysis,
         concurrency=config.concurrency,
         concurrent_fragments=config.concurrent_fragments,
+        subtitle_langs=subtitle_langs,
+        subtitles_only=subtitles_only,
     )
 
 
@@ -486,6 +576,12 @@ def run_from_args(args: argparse.Namespace, config: AppConfig) -> int:
     existing_behavior = args.overwrite or config.existing_file_behavior
     concurrency = args.concurrency if args.concurrency is not None else config.concurrency
 
+    subtitle_langs = [c.strip() for c in (args.subtitles or "").split(",") if c.strip()]
+    subtitles_only = args.subtitles_only
+    if subtitles_only and not subtitle_langs:
+        print("ERROR: --subtitles-only requires --subtitles to specify at least one language.")
+        return 1
+
     return run_download_workflow(
         url=url,
         quality_label=quality_label,
@@ -496,6 +592,8 @@ def run_from_args(args: argparse.Namespace, config: AppConfig) -> int:
         interactive=False,
         concurrency=concurrency,
         concurrent_fragments=config.concurrent_fragments,
+        subtitle_langs=subtitle_langs,
+        subtitles_only=subtitles_only,
     )
 
 

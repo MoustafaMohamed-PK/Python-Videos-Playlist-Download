@@ -17,6 +17,7 @@ presentation.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -25,7 +26,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 import yt_dlp
 
-from app.filename import build_filename, dedupe_path, existing_outputs
+from app.filename import (
+    build_filename,
+    dedupe_path,
+    existing_outputs,
+    existing_subtitle_outputs,
+)
 from app.formats import QualityChoice, build_format_selector
 from app.utils import ffmpeg_available
 
@@ -186,6 +192,11 @@ class VideoResult:
     skipped: bool = False
     error: Optional[str] = None
     output_path: Optional[Path] = None
+    # Set when the item otherwise succeeded but one or more requested
+    # subtitle languages had to be dropped after repeated failures
+    # (e.g. the site rate-limiting a second/third language request) --
+    # see download_one's subtitle retry loop.
+    warning: Optional[str] = None
 
 
 @dataclass
@@ -310,6 +321,17 @@ def fetch_formats_for_video(url: str) -> List[Dict[str, Any]]:
 # Download
 # --------------------------------------------------------------------------
 
+# yt-dlp raises exactly this shape (YoutubeDL._write_subtitles) when one
+# subtitle language's fetch fails -- e.g. a site rate-limiting the
+# second or third language request in the same run (HTTP 429). It
+# aborts the *entire* download (video included, since subtitles are
+# fetched before the media file) unless the caller works around it --
+# see download_one's retry loop, which parses the language out of this
+# message to drop it and retry rather than losing the whole item over
+# one language.
+_SUBTITLE_FETCH_ERROR_RE = re.compile(r"Unable to download video subtitles for '([^']+)':")
+
+
 class Downloader:
     """Configures and runs yt-dlp downloads for a video or playlist."""
 
@@ -325,6 +347,8 @@ class Downloader:
         prefer_mp4: bool = True,
         concurrent_fragments: int = 4,
         cancel_event: Optional[threading.Event] = None,
+        subtitle_langs: Optional[List[str]] = None,
+        subtitles_only: bool = False,
     ):
         self.destination = destination
         self.quality = quality
@@ -333,6 +357,14 @@ class Downloader:
         self.existing_file_behavior = existing_file_behavior
         self.progress_callback = progress_callback
         self.ask_overwrite_callback = ask_overwrite_callback
+        # Language codes to fetch subtitles for (both manual and
+        # auto-generated -- see _build_ydl_opts), saved as sidecar
+        # files next to the media. Empty means "no subtitles".
+        self.subtitle_langs = subtitle_langs or []
+        # When True, skip the video/audio entirely and download only
+        # the requested subtitle_langs -- see _build_ydl_opts and
+        # download_one's post-download file lookup.
+        self.subtitles_only = subtitles_only
         # Whether forcing a remux to .mp4 makes sense for what's being
         # downloaded. Callers with real formats up front (a single
         # video) should pass formats_support_mp4(formats); a webm/vp9
@@ -350,7 +382,7 @@ class Downloader:
         # download_many; set it to interrupt an in-progress run.
         self.cancel_event = cancel_event
 
-        if not self.quality.is_audio_only and not ffmpeg_available():
+        if not self.subtitles_only and not self.quality.is_audio_only and not ffmpeg_available():
             # We don't hard-fail here because many single-quality
             # "progressive" streams don't need merging -- yt-dlp will
             # raise its own FFmpeg-related error at download time if a
@@ -407,11 +439,23 @@ class Downloader:
 
         return hook
 
-    def _build_ydl_opts(self, stem_path: Path, video_index: int, video_total: int, title: str) -> Dict[str, Any]:
+    def _build_ydl_opts(
+        self,
+        stem_path: Path,
+        video_index: int,
+        video_total: int,
+        title: str,
+        subtitle_langs: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        # Accepts an explicit override (rather than always reading
+        # self.subtitle_langs) so download_one's per-item retry loop can
+        # narrow the language list for just that item without mutating
+        # shared state -- this Downloader instance is reused across
+        # concurrently-running items in download_many's thread pool.
+        subtitle_langs = self.subtitle_langs if subtitle_langs is None else subtitle_langs
         outtmpl = f"{stem_path}.%(ext)s"
 
         opts: Dict[str, Any] = {
-            "format": build_format_selector(self.quality),
             "outtmpl": outtmpl,
             "quiet": True,
             "no_warnings": True,
@@ -423,29 +467,66 @@ class Downloader:
             "progress_hooks": [self._make_progress_hook(video_index, video_total, title)],
             "noplaylist": True,  # we drive playlist iteration ourselves
             "concurrent_fragment_downloads": self.concurrent_fragments,
+        }
+
+        postprocessors: List[Dict[str, Any]] = []
+
+        if self.subtitles_only:
+            opts["skip_download"] = True
+        else:
+            opts["format"] = build_format_selector(self.quality)
             # A preference list, not a hard requirement (yt-dlp picks the
             # first one whose codecs actually fit -- see
             # get_compatible_ext): falls back to mkv rather than forcing
             # an incompatible mp4 mux when the codecs don't fit it.
-            "merge_output_format": "mp4/mkv",
-        }
+            opts["merge_output_format"] = "mp4/mkv"
 
-        if self.quality.is_audio_only:
-            opts["postprocessors"] = [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }
-            ]
-        elif self.prefer_mp4:
-            # Force a remux to mp4 only when the site's codecs are known
-            # to fit it -- this is a no-op stream-copy if the merge/
-            # download already produced mp4, but on a webm/vp9-only site
-            # it would otherwise force a lossy or failing conversion.
-            opts["postprocessors"] = [
-                {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
-            ]
+            if self.quality.is_audio_only:
+                postprocessors.append(
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                )
+            elif self.prefer_mp4:
+                # Force a remux to mp4 only when the site's codecs are
+                # known to fit it -- this is a no-op stream-copy if the
+                # merge/download already produced mp4, but on a
+                # webm/vp9-only site it would otherwise force a lossy or
+                # failing conversion.
+                postprocessors.append({"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"})
+
+        if subtitle_langs:
+            # Both flags enabled with the same language list: yt-dlp
+            # fetches a manual (human-authored) track when one exists
+            # for a requested language, falling back to the
+            # auto-generated caption otherwise -- exactly "subtitles
+            # for these languages, whichever source has them" rather
+            # than requiring the caller to know in advance which
+            # source each language comes from.
+            opts["writesubtitles"] = True
+            opts["writeautomaticsub"] = True
+            opts["subtitleslangs"] = subtitle_langs
+            opts["subtitlesformat"] = "srt/best"
+            if len(subtitle_langs) > 1:
+                # A brief pause between each language's subtitle fetch
+                # -- some sites (YouTube included) rate-limit rapid
+                # back-to-back subtitle requests for the same video
+                # with HTTP 429, which otherwise aborts the whole item
+                # (see _SUBTITLE_FETCH_ERROR_RE and the retry loop in
+                # download_one).
+                opts["sleep_interval_subtitles"] = 1
+            if ffmpeg_available():
+                # Normalizes to .srt regardless of the site's native
+                # subtitle format (commonly .vtt) for maximum player
+                # compatibility. Skipped without ffmpeg rather than
+                # failing the whole download -- the subtitle is still
+                # saved, just in its original format.
+                postprocessors.append({"key": "FFmpegSubtitlesConvertor", "format": "srt"})
+
+        if postprocessors:
+            opts["postprocessors"] = postprocessors
 
         return opts
 
@@ -467,7 +548,11 @@ class Downloader:
         stem = self._video_index_to_stem(index, metadata)
         stem_path = self.destination / stem
 
-        existing = existing_outputs(self.destination, stem)
+        existing = (
+            existing_subtitle_outputs(self.destination, stem)
+            if self.subtitles_only
+            else existing_outputs(self.destination, stem)
+        )
         if existing:
             behavior = self.existing_file_behavior
             if behavior == "ask" and self.ask_overwrite_callback:
@@ -484,38 +569,87 @@ class Downloader:
             # "overwrite" falls through to a normal download below.
             # Any other behavior value also falls through defensively.
 
-        ydl_opts = self._build_ydl_opts(stem_path, index, video_total, title)
+        logger.info(
+            "Starting download | url=%s | quality=%s | destination=%s | filename=%s",
+            url, self.quality.label, self.destination, stem,
+        )
 
         # The real output extension depends on the site's actual codecs
         # (mp4, webm, mkv, mp3, ...) -- post_hooks fires with the final
         # path after all postprocessing, so this is the authoritative
         # way to learn it rather than assuming .mp4/.mp3.
         captured_paths: List[Path] = []
-        ydl_opts["post_hooks"] = [lambda path: captured_paths.append(Path(path))]
 
-        logger.info(
-            "Starting download | url=%s | quality=%s | destination=%s | filename=%s",
-            url, self.quality.label, self.destination, stem,
+        # yt-dlp fetches subtitles *before* the media file and aborts
+        # the entire item if even one requested language's fetch fails
+        # (a transient rate limit, most commonly) -- see
+        # _SUBTITLE_FETCH_ERROR_RE. Rather than losing the video (and
+        # any subtitle languages that already succeeded) over that,
+        # retry with the failing language dropped -- capped at one
+        # retry per requested language so a genuinely broken language
+        # can't loop forever.
+        remaining_subtitle_langs = list(self.subtitle_langs)
+        skipped_subtitle_langs: List[str] = []
+        attempts_left = len(remaining_subtitle_langs) + 1
+
+        while True:
+            ydl_opts = self._build_ydl_opts(
+                stem_path, index, video_total, title, subtitle_langs=remaining_subtitle_langs
+            )
+            ydl_opts["post_hooks"] = [lambda path: captured_paths.append(Path(path))]
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                break
+            except yt_dlp.utils.DownloadCancelled:
+                logger.info("Download cancelled | url=%s", url)
+                return VideoResult(index=index, title=title, success=False, error="Cancelled")
+            except yt_dlp.utils.DownloadError as exc:
+                attempts_left -= 1
+                match = _SUBTITLE_FETCH_ERROR_RE.search(str(exc))
+                failed_lang = match.group(1) if match else None
+                if failed_lang and failed_lang in remaining_subtitle_langs and attempts_left > 0:
+                    remaining_subtitle_langs.remove(failed_lang)
+                    skipped_subtitle_langs.append(failed_lang)
+                    logger.warning(
+                        "Dropping subtitle language %r after fetch failure (%s) | url=%s",
+                        failed_lang, exc, url,
+                    )
+                    continue
+                friendly = classify_ytdlp_error(exc)
+                logger.error("Download failed | url=%s | reason=%s", url, friendly)
+                return VideoResult(index=index, title=title, success=False, error=str(friendly))
+            except OSError as exc:
+                friendly = classify_ytdlp_error(exc)
+                logger.error("Download failed (OS error) | url=%s | reason=%s", url, friendly)
+                return VideoResult(index=index, title=title, success=False, error=str(friendly))
+
+        warning = (
+            f"Subtitle(s) unavailable after repeated errors, skipped: {', '.join(skipped_subtitle_langs)}"
+            if skipped_subtitle_langs
+            else None
         )
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-        except yt_dlp.utils.DownloadCancelled:
-            logger.info("Download cancelled | url=%s", url)
-            return VideoResult(index=index, title=title, success=False, error="Cancelled")
-        except yt_dlp.utils.DownloadError as exc:
-            friendly = classify_ytdlp_error(exc)
-            logger.error("Download failed | url=%s | reason=%s", url, friendly)
-            return VideoResult(index=index, title=title, success=False, error=str(friendly))
-        except OSError as exc:
-            friendly = classify_ytdlp_error(exc)
-            logger.error("Download failed (OS error) | url=%s | reason=%s", url, friendly)
-            return VideoResult(index=index, title=title, success=False, error=str(friendly))
+        if self.subtitles_only:
+            # post_hooks only fires for downloaded media files, so a
+            # subtitles-only run (no media file at all) has to look up
+            # what actually landed on disk instead.
+            subtitle_files = existing_subtitle_outputs(self.destination, stem)
+            if not subtitle_files:
+                logger.warning("No subtitles found | url=%s | langs=%s", url, self.subtitle_langs)
+                return VideoResult(
+                    index=index,
+                    title=title,
+                    success=False,
+                    error="No subtitles were found for the requested language(s).",
+                )
+            output_path = subtitle_files[0]
+            logger.info("Subtitle download succeeded | url=%s | file=%s", url, output_path.name)
+            return VideoResult(index=index, title=title, success=True, output_path=output_path, warning=warning)
 
         output_path = captured_paths[-1] if captured_paths else stem_path
         logger.info("Download succeeded | url=%s | file=%s", url, output_path.name)
-        return VideoResult(index=index, title=title, success=True, output_path=output_path)
+        return VideoResult(index=index, title=title, success=True, output_path=output_path, warning=warning)
 
     def download_many(
         self,

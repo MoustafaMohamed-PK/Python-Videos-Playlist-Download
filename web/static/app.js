@@ -17,6 +17,9 @@
   const jobForm = document.getElementById("job-form");
   const qualitySelect = document.getElementById("quality-select");
   const namingSelect = document.getElementById("naming-select");
+  const subtitleOptionsEl = document.getElementById("subtitle-options");
+  const subtitleLangsInput = document.getElementById("subtitle-langs-input");
+  const subtitlesOnlyCheckbox = document.getElementById("subtitles-only-checkbox");
   const destinationInput = document.getElementById("destination-input");
   const existingSelect = document.getElementById("existing-select");
   const concurrencyInput = document.getElementById("concurrency-input");
@@ -39,6 +42,7 @@
 
   let currentUrl = null;
   let browseCurrentPath = null;
+  let subtitleCheckboxes = [];
   const jobCards = new Map(); // job_id -> DOM element
 
   function jsonFetch(url, options = {}) {
@@ -151,7 +155,54 @@
       opt.textContent = q.label;
       qualitySelect.appendChild(opt);
     }
+
+    renderSubtitleOptions(data.subtitles || []);
+    subtitlesOnlyCheckbox.checked = false;
+    qualitySelect.disabled = false;
   }
+
+  // ---- Subtitles ----
+
+  function renderSubtitleOptions(subs) {
+    subtitleOptionsEl.innerHTML = "";
+    subtitleCheckboxes = [];
+
+    if (subs.length === 0) {
+      // No subtitle list known upfront (e.g. a playlist) -- fall back
+      // to letting the user type language codes directly.
+      subtitleLangsInput.hidden = false;
+      return;
+    }
+
+    subtitleLangsInput.hidden = true;
+    for (const sub of subs) {
+      const label = document.createElement("label");
+      label.className = "checkbox-row";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = sub.lang;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(sub.label));
+      subtitleOptionsEl.appendChild(label);
+      subtitleCheckboxes.push(cb);
+    }
+  }
+
+  function selectedSubtitleLangs() {
+    if (subtitleCheckboxes.length > 0) {
+      return subtitleCheckboxes.filter((cb) => cb.checked).map((cb) => cb.value);
+    }
+    return subtitleLangsInput.value
+      .split(",")
+      .map((code) => code.trim())
+      .filter(Boolean);
+  }
+
+  // Subtitles-only downloads don't use a video/audio quality -- gray
+  // out the selector so it's clear it won't apply.
+  subtitlesOnlyCheckbox.addEventListener("change", () => {
+    qualitySelect.disabled = subtitlesOnlyCheckbox.checked;
+  });
 
   // ---- Start job ----
 
@@ -159,6 +210,13 @@
     event.preventDefault();
     hideError(jobError);
     if (!currentUrl) return;
+
+    const subtitleLangs = selectedSubtitleLangs();
+    const subtitlesOnly = subtitlesOnlyCheckbox.checked;
+    if (subtitlesOnly && subtitleLangs.length === 0) {
+      showError(jobError, "Choose at least one subtitle language, or uncheck “Subtitles only”.");
+      return;
+    }
 
     startBtn.disabled = true;
     try {
@@ -171,6 +229,8 @@
           destination_path: destinationInput.value.trim(),
           existing_file_behavior: existingSelect.value,
           concurrency: Number(concurrencyInput.value) || 1,
+          subtitle_langs: subtitleLangs,
+          subtitles_only: subtitlesOnly,
         }),
       });
       // The job card is created from the SSE stream / the follow-up
@@ -280,6 +340,12 @@
         a.textContent = r.title;
         a.setAttribute("download", "");
         li.appendChild(a);
+        if (r.warning) {
+          const warn = document.createElement("span");
+          warn.className = "file-warning";
+          warn.textContent = ` — ${r.warning}`;
+          li.appendChild(warn);
+        }
       } else if (!r.success) {
         li.className = "failed";
         li.textContent = `${r.title}: ${r.error || "failed"}`;

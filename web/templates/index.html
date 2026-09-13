@@ -51,6 +51,21 @@
           </select>
         </div>
         <div class="field">
+          <label>Subtitles</label>
+          <div id="subtitle-options" class="subtitle-options"></div>
+          <input
+            id="subtitle-langs-input"
+            type="text"
+            placeholder="Language codes, comma-separated (e.g. en,es)"
+            autocomplete="off"
+            hidden
+          >
+          <label class="checkbox-row">
+            <input type="checkbox" id="subtitles-only-checkbox">
+            Subtitles only (skip video/audio)
+          </label>
+        </div>
+        <div class="field">
           <label for="destination-input">Destination folder</label>
           <div class="row">
             <input id="destination-input" type="text" placeholder="/path/to/folder" autocomplete="off">

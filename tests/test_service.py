@@ -29,8 +29,9 @@ WEBM_ONLY_FORMATS = [
 ]
 
 
-def _single_video_target(formats=SAMPLE_FORMATS, thumbnail=None) -> ExtractedTarget:
+def _single_video_target(formats=SAMPLE_FORMATS, thumbnail=None, raw_extra=None) -> ExtractedTarget:
     raw = {"thumbnail": thumbnail} if thumbnail else {}
+    raw.update(raw_extra or {})
     return ExtractedTarget(
         is_playlist=False,
         playlist_title=None,
@@ -116,6 +117,16 @@ class TestAnalyze(unittest.TestCase):
         result = analyze(YOUTUBE_URL, extractor=FakeExtractor(_single_video_target()))
         self.assertIsNone(result.thumbnail)
 
+    def test_single_video_builds_subtitle_menu_from_raw_info(self):
+        target = _single_video_target(raw_extra={"subtitles": {"en": [{"name": "English"}]}})
+        result = analyze(YOUTUBE_URL, extractor=FakeExtractor(target))
+        self.assertEqual([o.lang for o in result.subtitle_menu], ["en"])
+
+    def test_playlist_has_no_subtitle_menu(self):
+        target = _playlist_target([{"webpage_url": "https://example.com/1"}])
+        result = analyze(PLAYLIST_URL, extractor=FakeExtractor(target))
+        self.assertEqual(result.subtitle_menu, [])
+
 
 class TestPlan(unittest.TestCase):
     def test_available_quality_produces_run_plan(self):
@@ -167,6 +178,36 @@ class TestPlan(unittest.TestCase):
         run_plan = plan(request, analysis)
         self.assertFalse(run_plan.prefer_mp4)
 
+    def test_subtitles_only_skips_quality_validation(self):
+        # "9999p" isn't in SAMPLE_FORMATS and would normally raise
+        # QualityUnavailableError, but it's irrelevant when only
+        # subtitles are being downloaded.
+        analysis = analyze(YOUTUBE_URL, extractor=FakeExtractor(_single_video_target()))
+        request = DownloadRequest(
+            quality_label="9999p",
+            destination=Path("/tmp/whatever"),
+            filename_mode="original",
+            filename_pattern=None,
+            subtitle_langs=["en"],
+            subtitles_only=True,
+        )
+        run_plan = plan(request, analysis)  # must not raise
+        self.assertTrue(run_plan.subtitles_only)
+        self.assertEqual(run_plan.subtitle_langs, ["en"])
+
+    def test_subtitle_langs_carry_through_without_subtitles_only(self):
+        analysis = analyze(YOUTUBE_URL, extractor=FakeExtractor(_single_video_target()))
+        request = DownloadRequest(
+            quality_label="1080p",
+            destination=Path("/tmp/whatever"),
+            filename_mode="original",
+            filename_pattern=None,
+            subtitle_langs=["en", "es"],
+        )
+        run_plan = plan(request, analysis)
+        self.assertFalse(run_plan.subtitles_only)
+        self.assertEqual(run_plan.subtitle_langs, ["en", "es"])
+
     def test_playlist_quality_not_validated_upfront(self):
         # Playlists' per-item formats aren't known until download time,
         # so plan() must not reject a quality just because it isn't on
@@ -209,6 +250,27 @@ class TestExecute(unittest.TestCase):
             self.assertTrue((destination / "Test Video.mp4").exists())
             statuses = [e.status for e in events]
             self.assertEqual(statuses, ["downloading", "finished"])
+
+    def test_subtitles_only_run_produces_no_media_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            target = _single_video_target()
+            analysis = analyze(YOUTUBE_URL, extractor=FakeExtractor(target))
+            request = DownloadRequest(
+                quality_label="best",
+                destination=destination,
+                filename_mode="original",
+                filename_pattern=None,
+                subtitle_langs=["en"],
+                subtitles_only=True,
+            )
+            run_plan = plan(request, analysis)
+
+            result = execute(run_plan, downloader_factory=FakeDownloader)
+
+            self.assertEqual(result.downloaded, 1)
+            self.assertTrue((destination / "Test Video.en.srt").exists())
+            self.assertFalse((destination / "Test Video.mp4").exists())
 
 
 if __name__ == "__main__":

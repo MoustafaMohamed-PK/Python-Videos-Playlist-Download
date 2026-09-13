@@ -76,6 +76,8 @@ class FakeDownloader:
         prefer_mp4: bool = True,
         concurrent_fragments: int = 4,
         cancel_event=None,
+        subtitle_langs=None,
+        subtitles_only: bool = False,
         delay: float = 0.0,
         conflict_indices: frozenset = frozenset(),
     ):
@@ -89,6 +91,8 @@ class FakeDownloader:
         self.prefer_mp4 = prefer_mp4
         self.concurrent_fragments = concurrent_fragments
         self.cancel_event = cancel_event
+        self.subtitle_langs = subtitle_langs or []
+        self.subtitles_only = subtitles_only
         # Artificial per-item delay, purely for tests that need to
         # observe an in-progress state (job manager cancellation,
         # snapshot polling) instead of a job that finishes instantly.
@@ -157,9 +161,21 @@ class FakeDownloader:
             if self.delay:
                 time.sleep(self.delay)
 
-            ext = "mp3" if self.quality.is_audio_only else "mp4"
-            output_path = self.destination / f"{title}.{ext}"
-            output_path.write_bytes(b"fake media content")
+            for lang in self.subtitle_langs:
+                (self.destination / f"{title}.{lang}.srt").write_bytes(b"fake subtitle content")
+
+            if self.subtitles_only:
+                if not self.subtitle_langs:
+                    run_result.results.append(
+                        VideoResult(index=i, title=title, success=False, error="No subtitles were found.")
+                    )
+                    run_result.failed += 1
+                    continue
+                output_path = self.destination / f"{title}.{self.subtitle_langs[0]}.srt"
+            else:
+                ext = "mp3" if self.quality.is_audio_only else "mp4"
+                output_path = self.destination / f"{title}.{ext}"
+                output_path.write_bytes(b"fake media content")
 
             if self.progress_callback:
                 self.progress_callback(

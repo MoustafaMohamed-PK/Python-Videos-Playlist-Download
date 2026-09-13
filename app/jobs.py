@@ -103,6 +103,7 @@ class Job:
                     "success": r.success,
                     "skipped": r.skipped,
                     "error": r.error,
+                    "warning": r.warning,
                     "has_file": r.output_path is not None,
                 }
                 for r in (self.result.results if self.result else [])

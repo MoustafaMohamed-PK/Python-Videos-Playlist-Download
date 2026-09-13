@@ -18,6 +18,9 @@ browser UI — both share the exact same download engine.
 - Lets you choose the destination folder (creating it if needed).
 - Downloads playlist items in parallel (configurable) for faster runs,
   with live per-item and overall progress.
+- Downloads subtitles alongside the video/audio (pick from the
+  languages the site actually reports, manual or auto-generated), or
+  subtitles only, with no video/audio at all.
 - Resumes interrupted downloads automatically (via yt-dlp).
 - Remembers your preferences in `config.json` for next time.
 - Skips, overwrites, or asks about files that already exist.
@@ -181,6 +184,8 @@ python main.py --url "https://soundcloud.com/artist/track" --quality audio --out
 | `--overwrite`   | `skip`, `overwrite`, or `ask` — behavior for existing files.           |
 | `--playlist`    | Force playlist handling (type is normally auto-detected anyway).      |
 | `--concurrency` | Playlist items to download in parallel, 1-8 (default: from config, normally 3). |
+| `--subtitles`   | Comma-separated subtitle language codes to download, e.g. `en,es`.    |
+| `--subtitles-only` | Skip video/audio entirely and download only the `--subtitles` languages. |
 | `--config`      | Path to an alternate config JSON file.                                |
 
 ## Quality selection
@@ -201,6 +206,29 @@ players, and merged into `.mp4`. On webm/vp9/opus-only sites, the app
 doesn't force an incompatible mp4 remux — it lets the container follow
 the codecs actually available. Audio-only downloads are extracted to
 `.mp3` regardless of source format.
+
+## Subtitles
+
+For a single video, the app reports the subtitle languages the site
+actually has (manual, human-authored captions, and auto-generated
+ones — a language only available as an auto-generated caption is
+labeled accordingly, since the accuracy differs). For a playlist,
+per-item subtitle tracks aren't known upfront, so you type language
+codes directly (e.g. `en`, `es`) instead of picking from a list.
+
+Choose one of three modes, in the interactive CLI or the web UI:
+
+- **Video/audio** — no subtitles (the default).
+- **Video/audio + subtitles** — the selected languages are saved as
+  `.srt` sidecar files next to the video (e.g. `Title.en.srt`),
+  converted from the site's native format (usually `.vtt`) when
+  FFmpeg is available, left in that native format otherwise.
+- **Subtitles only** — downloads just the subtitle files for the
+  selected languages, skipping video/audio entirely.
+
+In non-interactive mode, use `--subtitles en,es` (alongside a normal
+video/audio download) or `--subtitles en,es --subtitles-only` (nothing
+but the subtitles).
 
 ## Filename patterns
 
@@ -267,10 +295,13 @@ Paste a URL, review the title/thumbnail/duration/site and the real
 quality options, and pick where it goes: type a path directly, or
 click **Browse…** to navigate the machine's folders (with a "new
 folder" option) from a picker — the destination field starts pre-filled
-with the configured download root but isn't limited to it. Progress
-streams live (overall and, for a playlist, each item), and finished
-files are downloaded straight from the page. Reloading the page picks
-up any job still running or already finished.
+with the configured download root but isn't limited to it. Check off
+subtitle languages from the list (or type codes directly for a
+playlist) and, optionally, "Subtitles only" to skip video/audio
+entirely — see [Subtitles](#subtitles). Progress streams live (overall
+and, for a playlist, each item), and finished files are downloaded
+straight from the page. Reloading the page picks up any job still
+running or already finished.
 
 `--host`/`--port`/`--root`/`--config` mirror the CLI's `--config` and
 let you change the bind address, port, and default download root. See

@@ -191,5 +191,151 @@ class TestDownloadOneErrorClassification(unittest.TestCase):
         self.assertIn("ffmpeg", result.error.lower())
 
 
+class TestBuildYdlOptsSubtitles(unittest.TestCase):
+    def test_no_subtitles_requested_omits_subtitle_opts(self):
+        d = _make_downloader(cls=Downloader)
+        opts = d._build_ydl_opts(Path("/tmp/stem"), 1, 1, "Title")
+        self.assertNotIn("writesubtitles", opts)
+        self.assertIn("format", opts)
+
+    def test_subtitle_langs_sets_write_flags(self):
+        d = _make_downloader(cls=Downloader, subtitle_langs=["en", "es"])
+        opts = d._build_ydl_opts(Path("/tmp/stem"), 1, 1, "Title")
+        self.assertTrue(opts["writesubtitles"])
+        self.assertTrue(opts["writeautomaticsub"])
+        self.assertEqual(opts["subtitleslangs"], ["en", "es"])
+        # Still downloads video/audio -- subtitles_only wasn't set.
+        self.assertIn("format", opts)
+
+    def test_subtitles_only_skips_download_and_omits_format(self):
+        d = _make_downloader(cls=Downloader, subtitle_langs=["en"], subtitles_only=True)
+        opts = d._build_ydl_opts(Path("/tmp/stem"), 1, 1, "Title")
+        self.assertTrue(opts["skip_download"])
+        self.assertNotIn("format", opts)
+        self.assertNotIn("merge_output_format", opts)
+
+    def test_subtitles_only_ignores_audio_extraction_postprocessor(self):
+        d = Downloader(
+            destination=Path("/tmp/ytdl_test_downloader"),
+            quality=QualityChoice(label="audio"),
+            filename_mode="original",
+            filename_pattern=None,
+            subtitle_langs=["en"],
+            subtitles_only=True,
+        )
+        opts = d._build_ydl_opts(Path("/tmp/stem"), 1, 1, "Title")
+        keys = [pp["key"] for pp in opts.get("postprocessors", [])]
+        self.assertNotIn("FFmpegExtractAudio", keys)
+
+
+class TestSubtitleFetchRetry(unittest.TestCase):
+    """A subtitle fetch failure for one language (e.g. a rate limit)
+    aborts yt-dlp's entire download -- video included, since subtitles
+    are fetched before the media file. download_one must retry without
+    the failing language rather than losing the whole item.
+    """
+
+    @patch("app.downloader.yt_dlp.YoutubeDL")
+    def test_retries_without_failing_language_and_succeeds(self, mock_ydl_cls):
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_ydl_cls.return_value = mock_instance
+
+        calls = {"n": 0}
+
+        def fake_download(urls):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise yt_dlp.utils.DownloadError(
+                    "Unable to download video subtitles for 'ar': HTTP Error 429: Too Many Requests"
+                )
+
+        mock_instance.download.side_effect = fake_download
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_downloader(cls=Downloader, subtitle_langs=["en", "ar"])
+            d.destination = Path(tmp)
+            result = d.download_one("https://example.com/v", 1, 1, {"title": "Title"})
+
+        self.assertTrue(result.success)
+        self.assertEqual(calls["n"], 2)
+        self.assertIn("ar", result.warning)
+
+        second_call_opts = mock_ydl_cls.call_args_list[1].args[0]
+        self.assertEqual(second_call_opts["subtitleslangs"], ["en"])
+
+    @patch("app.downloader.yt_dlp.YoutubeDL")
+    def test_unrelated_download_error_is_not_retried(self, mock_ydl_cls):
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_instance.download.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: Private video. Sign in if you've been granted access to this video"
+        )
+        mock_ydl_cls.return_value = mock_instance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_downloader(cls=Downloader, subtitle_langs=["en"])
+            d.destination = Path(tmp)
+            result = d.download_one("https://example.com/v", 1, 1, {"title": "Title"})
+
+        self.assertFalse(result.success)
+        self.assertEqual(mock_instance.download.call_count, 1)
+        self.assertIn("private", result.error.lower())
+
+    @patch("app.downloader.yt_dlp.YoutubeDL")
+    def test_no_subtitles_requested_never_enters_retry_path(self, mock_ydl_cls):
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_instance.download.return_value = None
+        mock_ydl_cls.return_value = mock_instance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_downloader(cls=Downloader)
+            d.destination = Path(tmp)
+            result = d.download_one("https://example.com/v", 1, 1, {"title": "Title"})
+
+        self.assertTrue(result.success)
+        self.assertIsNone(result.warning)
+        self.assertEqual(mock_instance.download.call_count, 1)
+
+
+class TestDownloadOneSubtitlesOnly(unittest.TestCase):
+    @patch("app.downloader.yt_dlp.YoutubeDL")
+    def test_success_when_subtitle_file_lands_on_disk(self, mock_ydl_cls):
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_ydl_cls.return_value = mock_instance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            d = _make_downloader(cls=Downloader, subtitle_langs=["en"], subtitles_only=True)
+            d.destination = destination
+
+            def fake_download(urls):
+                (destination / "Title.en.srt").write_bytes(b"1\n00:00:00,000 --> 00:00:01,000\nHi\n")
+
+            mock_instance.download.side_effect = fake_download
+
+            result = d.download_one("https://example.com/v", 1, 1, {"title": "Title"})
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output_path.name, "Title.en.srt")
+
+    @patch("app.downloader.yt_dlp.YoutubeDL")
+    def test_failure_when_no_subtitle_file_produced(self, mock_ydl_cls):
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_instance.download.return_value = None
+        mock_ydl_cls.return_value = mock_instance
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = _make_downloader(cls=Downloader, subtitle_langs=["en"], subtitles_only=True)
+            d.destination = Path(tmp)
+            result = d.download_one("https://example.com/v", 1, 1, {"title": "Title"})
+
+        self.assertFalse(result.success)
+        self.assertIn("no subtitles", result.error.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

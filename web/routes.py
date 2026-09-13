@@ -104,6 +104,7 @@ def api_analyze():
             "thumbnail": analysis.thumbnail,
             "duration": duration,
             "qualities": [{"key": o.key, "label": o.label} for o in analysis.quality_menu],
+            "subtitles": [{"lang": o.lang, "label": o.label} for o in analysis.subtitle_menu],
             "warnings": analysis.warnings,
         }
     )
@@ -127,6 +128,14 @@ def api_create_job():
         concurrency = int(concurrency)
     except (TypeError, ValueError):
         return jsonify(error="concurrency must be an integer."), 400
+
+    subtitle_langs_raw = data.get("subtitle_langs") or []
+    if not isinstance(subtitle_langs_raw, list):
+        return jsonify(error="subtitle_langs must be a list of language codes."), 400
+    subtitle_langs = [str(lang).strip() for lang in subtitle_langs_raw if str(lang).strip()]
+    subtitles_only = bool(data.get("subtitles_only"))
+    if subtitles_only and not subtitle_langs:
+        return jsonify(error="subtitles_only requires at least one subtitle language."), 400
 
     manager = _job_manager()
     analysis = manager.cached_analysis(url)
@@ -165,6 +174,8 @@ def api_create_job():
         existing_file_behavior=existing_file_behavior,
         concurrency=concurrency,
         concurrent_fragments=concurrent_fragments,
+        subtitle_langs=subtitle_langs,
+        subtitles_only=subtitles_only,
     )
 
     try:

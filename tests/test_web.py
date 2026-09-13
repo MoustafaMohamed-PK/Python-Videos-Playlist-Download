@@ -13,13 +13,14 @@ from app.downloader import URLUnavailableError, VideoInfo
 from app.formats import QualityOption
 from app.jobs import JobManager
 from app.service import AnalyzeResult
+from app.subtitles import SubtitleOption
 from tests.fakes import FakeDownloader
 from web.app import create_app
 
 BASE_URL = "http://127.0.0.1:8765"
 
 
-def _fake_analysis(is_playlist=False, video_count=1, url="https://www.youtube.com/watch?v=abc"):
+def _fake_analysis(is_playlist=False, video_count=1, url="https://www.youtube.com/watch?v=abc", subtitle_menu=None):
     videos = [VideoInfo(id=f"id{i}", title=f"Item {i}", uploader="ChannelX") for i in range(video_count)]
     formats = (
         []
@@ -35,6 +36,7 @@ def _fake_analysis(is_playlist=False, video_count=1, url="https://www.youtube.co
         formats=formats,
         quality_menu=[QualityOption(key="best", label="Best available", height=None)],
         video_urls=[url] * video_count,
+        subtitle_menu=subtitle_menu or [],
     )
 
 
@@ -131,6 +133,15 @@ class TestAnalyzeEndpoint(WebTestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("unavailable", resp.get_json()["error"].lower())
 
+    @patch("web.routes.analyze")
+    def test_response_includes_subtitle_menu(self, mock_analyze):
+        mock_analyze.return_value = _fake_analysis(
+            subtitle_menu=[SubtitleOption(lang="en", label="English", auto_only=False)]
+        )
+        resp = self.post_json("/api/analyze", {"url": "https://www.youtube.com/watch?v=abc"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["subtitles"], [{"lang": "en", "label": "English"}])
+
 
 class TestJobCreation(WebTestCase):
     @patch("web.routes.analyze")
@@ -203,6 +214,43 @@ class TestJobCreation(WebTestCase):
         )
         self.assertEqual(resp.status_code, 400)
         self.assertIn("qualities", resp.get_json())
+
+    @patch("web.routes.analyze")
+    def test_subtitles_only_without_languages_rejected(self, mock_analyze):
+        mock_analyze.return_value = _fake_analysis()
+        resp = self.post_json(
+            "/api/jobs",
+            {"url": "https://www.youtube.com/watch?v=abc", "subtitles_only": True},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    @patch("web.routes.analyze")
+    def test_subtitle_langs_must_be_a_list(self, mock_analyze):
+        mock_analyze.return_value = _fake_analysis()
+        resp = self.post_json(
+            "/api/jobs",
+            {"url": "https://www.youtube.com/watch?v=abc", "subtitle_langs": "en"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    @patch("web.routes.analyze")
+    def test_subtitles_only_job_runs_and_produces_subtitle_file(self, mock_analyze):
+        mock_analyze.return_value = _fake_analysis()
+        resp = self.post_json(
+            "/api/jobs",
+            {
+                "url": "https://www.youtube.com/watch?v=abc",
+                "subtitle_langs": ["en"],
+                "subtitles_only": True,
+            },
+        )
+        self.assertEqual(resp.status_code, 202)
+        job_id = resp.get_json()["job_id"]
+        self.assertTrue(
+            _wait_until(lambda: self.job_manager.get(job_id).state.value == "completed")
+        )
+        output_path = self.job_manager.get(job_id).result.results[0].output_path
+        self.assertTrue(str(output_path).endswith(".en.srt"))
 
 
 class TestManualDestinationPath(WebTestCase):

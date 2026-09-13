@@ -10,6 +10,7 @@ from app.filename import (
     build_filename,
     dedupe_path,
     existing_outputs,
+    existing_subtitle_outputs,
     sanitize_filename,
     validate_pattern,
 )
@@ -161,6 +162,27 @@ class TestExistingOutputs(unittest.TestCase):
             (destination / "Video [Official].mp4").touch()
             found = existing_outputs(destination, "Video [Official]")
             self.assertEqual([p.name for p in found], ["Video [Official].mp4"])
+
+
+class TestExistingSubtitleOutputs(unittest.TestCase):
+    def test_finds_language_tagged_subtitle_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            (destination / "My Video.en.srt").touch()
+            found = existing_subtitle_outputs(destination, "My Video")
+            self.assertEqual([p.name for p in found], ["My Video.en.srt"])
+
+    def test_ignores_media_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            (destination / "My Video.mp4").touch()
+            found = existing_subtitle_outputs(destination, "My Video")
+            self.assertEqual(found, [])
+
+    def test_no_match_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            found = existing_subtitle_outputs(Path(tmp), "Nothing Here")
+            self.assertEqual(found, [])
 
 
 if __name__ == "__main__":
