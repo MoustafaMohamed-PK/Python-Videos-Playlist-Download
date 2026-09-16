@@ -737,6 +737,11 @@ to 2 GB.
 [`.github/workflows/release.yml`](.github/workflows/release.yml) builds
 everything on GitHub's machines. You don't need Wine or a Windows PC.
 
+**Full explanation:** [docs/github-actions-pipeline.md](docs/github-actions-pipeline.md)
+covers triggers, each job and step, the workflow file line by line,
+publishing, reading results, fixing failures, design decisions and
+costs.
+
 ```
 git tag v1.0.0 && git push origin v1.0.0
                     │
@@ -1174,6 +1179,10 @@ youtube_downloader/
 ├── build.ps1                # Build Windows executables natively
 ├── packaging/
 │   └── media-downloader.spec  # PyInstaller spec for both executables
+├── .github/workflows/
+│   └── release.yml          # CI: build on Windows + Ubuntu, publish a Release
+├── docs/
+│   └── github-actions-pipeline.md  # How the build/release pipeline works
 ├── README.md
 ├── config.json.example
 ├── app/
