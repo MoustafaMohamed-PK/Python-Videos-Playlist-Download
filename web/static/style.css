@@ -45,7 +45,31 @@ body {
   padding-block: 32px 8px;
 }
 
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.topbar-text { min-width: 0; }
 .topbar h1 { margin: 0; font-size: 1.5rem; }
+
+.stop-app {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--border);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.stop-app:hover:not(:disabled) { background: var(--danger-bg); }
+
+main[hidden] { display: none; }
+
+.stopped-card {
+  max-width: 720px;
+  margin: 16px auto;
+}
+.stopped-card p { margin-bottom: 0; color: var(--text-muted); }
 .subtitle { color: var(--text-muted); margin: 4px 0 0; }
 
 main {

@@ -21,6 +21,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.cli import main  # noqa: E402
+from app.utils import use_bundled_ffmpeg  # noqa: E402
 
 if __name__ == "__main__":
+    # A Windows console on a legacy code page (e.g. cp1252) can't encode
+    # every video title; print a placeholder instead of crashing.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+    use_bundled_ffmpeg()
     sys.exit(main())

@@ -25,6 +25,8 @@ Responsible for:
     - Relaying an "ask" existing-file conflict from a running job to
       the browser and back (GET job snapshot carries
       "pending_conflict"; POST /api/jobs/<id>/resolve answers it).
+    - Stopping the whole app (POST /api/shutdown), for the UI's
+      "Stop app" button and `--stop` on the command line.
 
 Nothing here talks to yt-dlp directly; all of that stays in
 app.downloader/app.service, so this module and the CLI can never
@@ -34,6 +36,7 @@ implement the download pipeline differently from each other.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from queue import Empty
@@ -308,6 +311,32 @@ def api_browse_mkdir():
         return jsonify(error=f"Could not create folder: {exc}"), 400
 
     return jsonify(path=str(new_dir)), 201
+
+
+@bp.get("/api/status")
+def api_status():
+    return jsonify(active_jobs=_job_manager().active_count())
+
+
+@bp.post("/api/shutdown")
+def api_shutdown():
+    """Stop the whole app (the "Stop app" button, and `webmain.py --stop`).
+
+    Covered by the same Host-allowlist and JSON-only checks as every
+    other mutation (web/security.py), so a random web page can't
+    trigger it. Running jobs are cancelled first; their partial files
+    stay on disk and resume next time.
+    """
+    shutdown = current_app.extensions.get("shutdown")
+    if shutdown is None:
+        return jsonify(error="Shutdown is not available."), 404
+
+    cancelled = _job_manager().cancel_all()
+    # Delay so this response is sent before the process goes away.
+    timer = threading.Timer(0.5, shutdown)
+    timer.daemon = True
+    timer.start()
+    return jsonify(stopping=True, cancelled_jobs=cancelled), 202
 
 
 @bp.get("/api/events")

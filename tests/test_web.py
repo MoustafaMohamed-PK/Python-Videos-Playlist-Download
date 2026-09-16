@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -480,6 +481,67 @@ class TestFileServing(WebTestCase):
         r = self.get(f"/api/jobs/{job_id}/files/1")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data, b"fake media content")
+
+
+class TestShutdown(WebTestCase):
+    def _app_with_shutdown(self):
+        stopped = threading.Event()
+        app = create_app(
+            download_root=self.root,
+            config=AppConfig(),
+            host="127.0.0.1",
+            port=8765,
+            job_manager=self.job_manager,
+            shutdown=stopped.set,
+        )
+        app.testing = True
+        return app.test_client(), stopped
+
+    def test_status_reports_active_jobs(self):
+        resp = self.get("/api/status")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json(), {"active_jobs": 0})
+
+    def test_shutdown_disabled_without_callback(self):
+        resp = self.post_json("/api/shutdown", {})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_shutdown_calls_callback_after_responding(self):
+        client, stopped = self._app_with_shutdown()
+        resp = client.post(
+            "/api/shutdown", data="{}", content_type="application/json", base_url=BASE_URL
+        )
+        self.assertEqual(resp.status_code, 202)
+        self.assertEqual(resp.get_json(), {"stopping": True, "cancelled_jobs": 0})
+        # Deferred, so the response above goes out first.
+        self.assertTrue(stopped.wait(timeout=3))
+
+    def test_shutdown_cancels_running_jobs(self):
+        with patch.object(self.job_manager, "cancel_all", return_value=2) as cancel_all:
+            client, stopped = self._app_with_shutdown()
+            resp = client.post(
+                "/api/shutdown", data="{}", content_type="application/json", base_url=BASE_URL
+            )
+        cancel_all.assert_called_once_with()
+        self.assertEqual(resp.get_json()["cancelled_jobs"], 2)
+        self.assertTrue(stopped.wait(timeout=3))
+
+    def test_shutdown_requires_json(self):
+        client, stopped = self._app_with_shutdown()
+        resp = client.post("/api/shutdown", data="", base_url=BASE_URL)
+        self.assertEqual(resp.status_code, 415)
+        self.assertFalse(stopped.wait(timeout=1))
+
+    def test_shutdown_rejects_foreign_host(self):
+        client, stopped = self._app_with_shutdown()
+        resp = client.post(
+            "/api/shutdown",
+            data="{}",
+            content_type="application/json",
+            base_url="http://evil.example:8765",
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(stopped.wait(timeout=1))
 
 
 if __name__ == "__main__":

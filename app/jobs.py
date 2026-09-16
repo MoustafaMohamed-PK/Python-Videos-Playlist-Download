@@ -244,6 +244,31 @@ class JobManager:
         job.cancel_event.set()
         return True
 
+    def active_count(self) -> int:
+        """Number of jobs still queued or running."""
+        with self._lock:
+            return sum(
+                1
+                for job in self._jobs.values()
+                if job.state in (JobState.QUEUED, JobState.RUNNING)
+            )
+
+    def cancel_all(self) -> int:
+        """Signal every queued/running job to stop; returns how many were signalled.
+
+        Used when the app is shutting down. Interrupted downloads keep
+        their partial files, so yt-dlp resumes them on the next run.
+        """
+        with self._lock:
+            active = [
+                job
+                for job in self._jobs.values()
+                if job.state in (JobState.QUEUED, JobState.RUNNING)
+            ]
+        for job in active:
+            job.cancel_event.set()
+        return len(active)
+
     def resolve_conflict(self, job_id: str, action: str) -> bool:
         """Answer a job's pending existing-file conflict.
 

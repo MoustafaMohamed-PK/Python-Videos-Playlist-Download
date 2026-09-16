@@ -467,8 +467,11 @@
 
   // ---- Live updates: one shared SSE connection for the whole page ----
 
+  let eventSource = null;
+
   function connectEvents() {
     const source = new EventSource("/api/events");
+    eventSource = source;
     source.onmessage = (event) => {
       try {
         const job = JSON.parse(event.data);
@@ -492,6 +495,42 @@
       /* best-effort */
     }
   }
+
+  // ---- Stopping the whole app ----
+
+  const stopAppBtn = document.getElementById("stop-app-btn");
+  const stoppedCard = document.getElementById("stopped-card");
+
+  stopAppBtn.addEventListener("click", async () => {
+    let message = "Stop Media Downloader? The page will stop working until you start the app again.";
+    try {
+      const status = await jsonFetch("/api/status");
+      if (status.active_jobs > 0) {
+        message =
+          `${status.active_jobs} download(s) are still in progress and will be cancelled ` +
+          "(they resume where they left off next time).\n\n" + message;
+      }
+    } catch (_) {
+      /* best-effort -- fall back to the generic message */
+    }
+    if (!window.confirm(message)) return;
+
+    stopAppBtn.disabled = true;
+    stopAppBtn.textContent = "Stopping…";
+    try {
+      await jsonFetch("/api/shutdown", { method: "POST", body: "{}" });
+    } catch (err) {
+      stopAppBtn.disabled = false;
+      stopAppBtn.textContent = "Stop app";
+      window.alert(`Could not stop the app: ${err.message}`);
+      return;
+    }
+    // Stop the auto-reconnecting event stream so it doesn't spin forever.
+    if (eventSource) eventSource.close();
+    document.querySelector("main").hidden = true;
+    stopAppBtn.hidden = true;
+    stoppedCard.hidden = false;
+  });
 
   connectEvents();
   loadExistingJobs();

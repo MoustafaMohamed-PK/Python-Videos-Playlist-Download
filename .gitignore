@@ -3,3 +3,11 @@ __pycache__/
 *.pyc
 logs/
 config.json
+
+# PyInstaller build artifacts (see build.sh / build.ps1) -- includes
+# downloaded FFmpeg binaries, the build venv, and the Wine prefix used
+# to cross-build Windows executables from Linux.
+build/
+dist/
+.build-venv/
+.build-wine/

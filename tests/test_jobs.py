@@ -126,6 +126,28 @@ class TestJobCancellation(unittest.TestCase):
         manager = JobManager(downloader_factory=FakeDownloader)
         self.assertFalse(manager.cancel("does-not-exist"))
 
+    def test_cancel_all_stops_every_active_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = JobManager(max_workers=2, downloader_factory=partial(FakeDownloader, delay=0.2))
+            ids = [manager.submit(_plan(Path(tmp) / str(i), video_count=5)) for i in range(2)]
+            self.assertTrue(_wait_until(lambda: manager.active_count() == 2))
+
+            self.assertEqual(manager.cancel_all(), 2)
+
+            self.assertTrue(_wait_until(lambda: manager.active_count() == 0, timeout=3))
+            for job_id in ids:
+                self.assertEqual(manager.get(job_id).state, JobState.CANCELLED)
+
+    def test_cancel_all_ignores_finished_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = JobManager(downloader_factory=FakeDownloader)
+            job_id = manager.submit(_plan(Path(tmp), video_count=1))
+            self.assertTrue(_wait_until(lambda: manager.get(job_id).state == JobState.COMPLETED))
+
+            self.assertEqual(manager.active_count(), 0)
+            self.assertEqual(manager.cancel_all(), 0)
+            self.assertEqual(manager.get(job_id).state, JobState.COMPLETED)
+
 
 class TestJobSubscribers(unittest.TestCase):
     def test_subscriber_receives_progress_updates(self):

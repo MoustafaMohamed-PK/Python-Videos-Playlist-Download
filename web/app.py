@@ -15,7 +15,7 @@ decides that (waitress, bound to 127.0.0.1 by default).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from flask import Flask
 
@@ -32,10 +32,15 @@ def create_app(
     host: str = "127.0.0.1",
     port: int = 8765,
     job_manager: Optional[JobManager] = None,
+    shutdown: Optional[Callable[[], None]] = None,
 ) -> Flask:
     app = Flask(__name__)
     app.extensions["job_manager"] = job_manager or JobManager(max_workers=2)
     app.extensions["download_root"] = download_root
+    # Called by POST /api/shutdown to stop the whole process. webmain.py
+    # supplies one; left None (endpoint disabled) when the app is
+    # embedded elsewhere, e.g. in tests.
+    app.extensions["shutdown"] = shutdown
     app.extensions["default_settings"] = {
         "quality": config.quality,
         "filename_mode": config.filename_mode,

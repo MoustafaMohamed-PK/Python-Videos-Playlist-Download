@@ -1,0 +1,4 @@
+# Build-only dependencies for packaging standalone executables with
+# PyInstaller (see build.sh / build.ps1 / packaging/media-downloader.spec).
+# Not needed to run the app from source -- see requirements.txt for that.
+pyinstaller>=6.16

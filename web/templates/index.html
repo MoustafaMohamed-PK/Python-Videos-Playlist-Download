@@ -8,9 +8,17 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>Media Downloader</h1>
-    <p class="subtitle">Paste a link from any site yt-dlp supports.</p>
+    <div class="topbar-text">
+      <h1>Media Downloader</h1>
+      <p class="subtitle">Paste a link from any site yt-dlp supports.</p>
+    </div>
+    <button type="button" id="stop-app-btn" class="stop-app" title="Shut down the Media Downloader app">Stop app</button>
   </header>
+
+  <section class="card stopped-card" id="stopped-card" hidden>
+    <h2>Media Downloader has stopped</h2>
+    <p>You can close this tab. To use it again, start the app again.</p>
+  </section>
 
   <main>
     <section class="card" id="analyze-card">

@@ -3,6 +3,7 @@ Small cross-platform utility helpers.
 
 Responsible for:
     - Detecting FFmpeg on PATH (cross-platform, no hardcoded paths).
+    - Making a PyInstaller-bundled FFmpeg discoverable when frozen.
     - Human-readable formatting (bytes, ETA, progress bars).
     - Logging setup.
 """
@@ -10,9 +11,36 @@ Responsible for:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional
+
+
+def use_bundled_ffmpeg() -> None:
+    """Make a PyInstaller-bundled FFmpeg discoverable, if this is a build.
+
+    The ``media-downloader.spec`` packages ``ffmpeg``/``ffprobe`` into an
+    ``ffmpeg/`` folder inside the onefile bundle (see packaging/). When
+    running frozen (``sys.frozen`` set by PyInstaller), this prepends
+    that folder to ``PATH`` so the existing :func:`find_ffmpeg` --
+    and yt-dlp's own FFmpeg lookup -- pick it up with no further
+    changes.
+
+    A no-op when running from source, or when the frozen bundle has no
+    ffmpeg/ folder (e.g. a future build that intentionally omits it),
+    so it's always safe to call unconditionally at startup.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if not bundle_dir:
+        return
+    ffmpeg_dir = Path(bundle_dir) / "ffmpeg"
+    if not ffmpeg_dir.is_dir():
+        return
+    os.environ["PATH"] = str(ffmpeg_dir) + os.pathsep + os.environ.get("PATH", "")
 
 
 def find_ffmpeg() -> Optional[str]:
