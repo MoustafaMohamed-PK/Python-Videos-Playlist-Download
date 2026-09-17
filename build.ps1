@@ -15,7 +15,12 @@ $ErrorActionPreference = "Stop"
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RootDir
 
-$FfmpegReleaseUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
+# gyan.dev's "essentials" build (~103 MB) rather than BtbN's (~170 MB):
+# FFmpeg dominates the size of the finished .exe, and this one still
+# includes libmp3lame, which the audio-only mode needs. Only ffmpeg.exe
+# is kept -- see packaging\media-downloader.spec for why ffprobe.exe
+# isn't bundled. Keep this in sync with FFMPEG_WINDOWS_URL in build.sh.
+$FfmpegReleaseUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 # $ErrorActionPreference doesn't cover native executables, so check
 # their exit codes explicitly.
@@ -51,7 +56,6 @@ if (-not (Test-Path "build\ffmpeg-win\ffmpeg.exe")) {
     Expand-Archive -Path $TmpZip -DestinationPath $UnzipDir
     $ExtractedDir = Get-ChildItem -Path $UnzipDir -Directory | Select-Object -First 1
     Copy-Item (Join-Path $ExtractedDir.FullName "bin\ffmpeg.exe") "build\ffmpeg-win\ffmpeg.exe"
-    Copy-Item (Join-Path $ExtractedDir.FullName "bin\ffprobe.exe") "build\ffmpeg-win\ffprobe.exe"
     Remove-Item $TmpZip -Force
     Remove-Item $UnzipDir -Recurse -Force
 }

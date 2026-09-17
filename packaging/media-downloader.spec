@@ -6,7 +6,7 @@ PyInstaller spec for the two standalone executables:
     media-downloader-ui    <- webmain.py (the web UI)
 
 Built via build.sh (Linux, and Windows through Wine) or build.ps1
-(Windows, native). Both executables bundle FFmpeg/ffprobe (see
+(Windows, native). Both executables bundle FFmpeg (see
 app.utils.use_bundled_ffmpeg) so nothing else needs to be installed on
 the target machine.
 
@@ -33,9 +33,31 @@ IS_WINDOWS = sys.platform.startswith("win")
 FFMPEG_DIR = ROOT / "build" / ("ffmpeg-win" if IS_WINDOWS else "ffmpeg")
 FFMPEG_EXT = ".exe" if IS_WINDOWS else ""
 
+# Only ffmpeg is bundled, not ffprobe: the two binaries are static
+# builds of nearly identical size (~80 MB each), and shipping both
+# doubled every executable for no benefit. yt-dlp falls back to
+# "ffmpeg -i" wherever it would otherwise probe (merging, audio
+# extraction, remuxing, subtitle conversion all work unchanged); the
+# only ffprobe-only path is an HLS-in-mp4 fixup, which degrades to a
+# warning and still applies its fix.
 ffmpeg_binaries = [
     (str(FFMPEG_DIR / f"ffmpeg{FFMPEG_EXT}"), "ffmpeg"),
-    (str(FFMPEG_DIR / f"ffprobe{FFMPEG_EXT}"), "ffmpeg"),
+]
+
+# Stdlib/3rd-party packages nothing in this app imports. PyInstaller
+# pulls some in through optional-import chains, where they are dead
+# weight in a download tool: a GUI toolkit, the test suites, and the
+# packaging machinery that only matters at build time.
+EXCLUDED_MODULES = [
+    "tkinter",
+    "test",
+    "unittest",
+    "pydoc_data",
+    "lib2to3",
+    "setuptools",
+    "pip",
+    "wheel",
+    "PyInstaller",
 ]
 
 # curl_cffi ships a native extension plus data files (its bundled CA
@@ -47,7 +69,7 @@ common_kwargs = dict(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=EXCLUDED_MODULES,
     noarchive=False,
     cipher=block_cipher,
 )

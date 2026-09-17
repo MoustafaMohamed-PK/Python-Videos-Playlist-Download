@@ -21,7 +21,8 @@ from typing import Optional
 def use_bundled_ffmpeg() -> None:
     """Make a PyInstaller-bundled FFmpeg discoverable, if this is a build.
 
-    The ``media-downloader.spec`` packages ``ffmpeg``/``ffprobe`` into an
+    The ``media-downloader.spec`` packages ``ffmpeg`` (only -- not
+    ``ffprobe``, which would double the executable's size) into an
     ``ffmpeg/`` folder inside the onefile bundle (see packaging/). When
     running frozen (``sys.frozen`` set by PyInstaller), this prepends
     that folder to ``PATH`` so the existing :func:`find_ffmpeg` --

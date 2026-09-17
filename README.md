@@ -98,7 +98,7 @@ installed, and why the first start takes a few seconds.
 | Install Python? | No | Yes |
 | Install FFmpeg? | No, it's built in | Yes |
 | Setup time | About 2 minutes | About 10 minutes |
-| Download size | About 160 MB per program | Small, plus Python and FFmpeg |
+| Download size | About 57 MB per program (Linux); ~70 MB on Windows | Small, plus Python and FFmpeg |
 | Update yt-dlp yourself | No, download a newer release | Yes, one command |
 | Best for | Just using the app | Changing the code, or always having the latest yt-dlp |
 
@@ -704,8 +704,9 @@ See [CLI (non-interactive) usage](#cli-non-interactive-usage).
 - **yt-dlp is frozen inside:** sites change often. If one stops
   working, download a newer release (or use the source version and
   `pip install --upgrade -r requirements.txt`).
-- **Size:** each program is about 160 MB. Python, all libraries and
-  FFmpeg are inside.
+- **Size:** each program is about 57 MB on Linux and about 70 MB on
+  Windows. Python, all libraries and FFmpeg are inside, and FFmpeg
+  alone is roughly two thirds of that.
 
 ## Building and publishing the executables
 
@@ -722,12 +723,11 @@ committed.
 The finished programs (`dist/windows/*.exe` and
 `dist/linux/media-downloader-*`) are ignored because:
 
-- **They're too big:** each is about 160 MB, and GitHub rejects any
-  file over 100 MB, so the push would fail.
 - **They're generated:** anyone can rebuild them with the scripts
   below.
-- **They'd bloat the history:** committing them would add another
-  ~330 MB to the repository on every rebuild.
+- **They'd bloat the history:** at 57-70 MB each, committing them
+  would add another ~250 MB (four files) to the repository on every
+  rebuild.
 
 They're published on **GitHub Releases** instead, which allows files up
 to 2 GB.

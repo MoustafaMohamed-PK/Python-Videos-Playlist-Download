@@ -21,7 +21,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 TARGET="${1:-all}"
-FFMPEG_RELEASE_BASE="https://github.com/BtbN/FFmpeg-Builds/releases/latest/download"
+
+# FFmpeg dominates the size of the finished executables, so the source
+# of each static build is chosen for size (see packaging/ for why only
+# ffmpeg, and never ffprobe, is bundled):
+#   Linux   johnvansickle.com   ~80 MB   (BtbN's build: ~172 MB)
+#   Windows gyan.dev essentials ~103 MB  (BtbN's build: ~170 MB)
+# Both are GPL builds including libmp3lame, which the audio-only mode
+# needs.
+FFMPEG_LINUX_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+FFMPEG_WINDOWS_URL="https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 log() { echo "==> $*"; }
 
@@ -94,19 +103,12 @@ EOF
         mkdir -p build/ffmpeg
         local tmp_tar
         tmp_tar="$(mktemp)"
-        curl -fL "${FFMPEG_RELEASE_BASE}/ffmpeg-master-latest-linux64-gpl.tar.xz" -o "$tmp_tar"
-        local extracted_dir
-        # pipefail must be off for this line: `head -1` closing the
-        # pipe early sends tar a SIGPIPE (exit 141), which pipefail
-        # would otherwise treat as this command failing outright.
-        set +o pipefail
-        extracted_dir="$(tar -tJf "$tmp_tar" | head -1 | cut -d/ -f1)"
-        set -o pipefail
-        tar -xJf "$tmp_tar" -C /tmp "${extracted_dir}/bin/ffmpeg" "${extracted_dir}/bin/ffprobe"
-        cp "/tmp/${extracted_dir}/bin/ffmpeg" build/ffmpeg/ffmpeg
-        cp "/tmp/${extracted_dir}/bin/ffprobe" build/ffmpeg/ffprobe
-        chmod +x build/ffmpeg/ffmpeg build/ffmpeg/ffprobe
-        rm -rf "$tmp_tar" "/tmp/${extracted_dir}"
+        curl -fL "$FFMPEG_LINUX_URL" -o "$tmp_tar"
+        # This archive nests everything under ffmpeg-<version>-amd64-static/,
+        # so --strip-components drops that directory level.
+        tar -xJf "$tmp_tar" -C build/ffmpeg --strip-components=1 --wildcards "*/ffmpeg"
+        chmod +x build/ffmpeg/ffmpeg
+        rm -f "$tmp_tar"
     fi
 
     .build-venv/bin/pyinstaller --clean --noconfirm \
@@ -171,14 +173,12 @@ EOF
     if [ ! -f build/ffmpeg-win/ffmpeg.exe ]; then
         log "Downloading static FFmpeg (Windows)"
         mkdir -p build/ffmpeg-win
-        local tmp_zip unzip_dir extracted_dir
+        local tmp_zip unzip_dir
         tmp_zip="$(mktemp --suffix=.zip)"
-        curl -fL "${FFMPEG_RELEASE_BASE}/ffmpeg-master-latest-win64-gpl.zip" -o "$tmp_zip"
+        curl -fL "$FFMPEG_WINDOWS_URL" -o "$tmp_zip"
         unzip_dir="$(mktemp -d)"
-        unzip -q "$tmp_zip" -d "$unzip_dir"
-        extracted_dir="$(find "$unzip_dir" -maxdepth 1 -mindepth 1 -type d | head -1)"
-        cp "$extracted_dir/bin/ffmpeg.exe" build/ffmpeg-win/ffmpeg.exe
-        cp "$extracted_dir/bin/ffprobe.exe" build/ffmpeg-win/ffprobe.exe
+        unzip -q -j "$tmp_zip" "*/bin/ffmpeg.exe" -d "$unzip_dir"
+        cp "$unzip_dir/ffmpeg.exe" build/ffmpeg-win/ffmpeg.exe
         rm -rf "$tmp_zip" "$unzip_dir"
     fi
 

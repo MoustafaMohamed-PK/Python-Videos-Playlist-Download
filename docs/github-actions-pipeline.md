@@ -178,9 +178,9 @@ Both scripts follow the same recipe:
 1. Create an isolated build environment (.build-venv)
         using $BUILD_PYTHON = the Python 3.12 from step 2
 2. pip install requirements.txt + requirements-build.txt (PyInstaller)
-3. Download a static FFmpeg + ffprobe build (BtbN/FFmpeg-Builds)
-        Windows → build/ffmpeg-win/ffmpeg.exe, ffprobe.exe
-        Linux   → build/ffmpeg/ffmpeg, ffprobe
+3. Download a static FFmpeg build (ffmpeg only -- not ffprobe)
+        Windows → build/ffmpeg-win/ffmpeg.exe   (gyan.dev "essentials")
+        Linux   → build/ffmpeg/ffmpeg          (johnvansickle.com)
 4. Run PyInstaller with packaging/media-downloader.spec
         → packs main.py    + libraries + FFmpeg → media-downloader-cli
         → packs webmain.py + libraries + FFmpeg
@@ -476,6 +476,7 @@ usually in the last lines of that step's output.
 | **Release only on `v*` tags** | Publishing is a deliberate act, and every release maps to one exact, labelled commit. |
 | **Manual trigger without release** | Lets you test the pipeline safely. |
 | **FFmpeg bundled, downloaded at build time** | Users need nothing installed, and the large binaries stay out of git. |
+| **Only `ffmpeg` bundled, from the smallest usable static build** | FFmpeg is most of each executable's size; dropping `ffprobe` (yt-dlp falls back to `ffmpeg -i`) and picking a leaner build took each program from ~165 MB to ~57 MB. |
 | **Onefile executables, not installers** | One file per program: download, run, delete to uninstall. |
 | **`fail-fast: false`** | You always see the result for both platforms. |
 | **Pinned action versions (`@v4`, `@v5`, `@v2`)** | Updates to the actions can't silently break the pipeline. |
