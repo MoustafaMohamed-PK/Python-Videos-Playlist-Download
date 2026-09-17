@@ -109,7 +109,11 @@ class FakeDownloader:
         metadatas: List[Dict[str, Any]],
         stop_on_first_failure: bool = False,
         concurrency: int = 1,
+        playlist_positions: Optional[List[Optional[int]]] = None,
     ) -> DownloadRunResult:
+        # Recorded rather than acted on: the real Downloader turns these
+        # into yt-dlp's "playlist_items", which has no fake equivalent.
+        self.playlist_positions = playlist_positions
         self.destination.mkdir(parents=True, exist_ok=True)
         run_result = DownloadRunResult(destination=self.destination)
 

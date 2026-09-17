@@ -32,7 +32,7 @@ class _FakeWorkDownloader(Downloader):
         self.started_order = []
         self._lock = threading.Lock()
 
-    def download_one(self, url, index, video_total, metadata):
+    def download_one(self, url, index, video_total, metadata, playlist_position=None):
         with self._lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
@@ -98,7 +98,7 @@ class TestDownloadManyConcurrent(unittest.TestCase):
         # Later-indexed items finish first (shorter delay) to prove
         # ordering comes from a post-hoc sort, not completion order.
         d = _make_downloader(delay=0.0)
-        d.download_one = lambda url, index, total, meta: (
+        d.download_one = lambda url, index, total, meta, playlist_position=None: (
             time.sleep(0.05 / index),  # higher index finishes sooner
             VideoResult(index=index, title="", success=True),
         )[1]
@@ -206,6 +206,21 @@ class TestBuildYdlOptsSubtitles(unittest.TestCase):
         self.assertEqual(opts["subtitleslangs"], ["en", "es"])
         # Still downloads video/audio -- subtitles_only wasn't set.
         self.assertIn("format", opts)
+
+    def test_playlist_position_selects_that_item_and_clears_noplaylist(self):
+        # Sites that put several videos behind one URL (an Instagram
+        # carousel post) can only be addressed by position, and
+        # "noplaylist" would override that and take the first video.
+        d = _make_downloader(cls=Downloader)
+        opts = d._build_ydl_opts(Path("/tmp/stem"), 2, 3, "Title", playlist_position=2)
+        self.assertEqual(opts["playlist_items"], "2")
+        self.assertFalse(opts["noplaylist"])
+
+    def test_without_playlist_position_noplaylist_stays_on(self):
+        d = _make_downloader(cls=Downloader)
+        opts = d._build_ydl_opts(Path("/tmp/stem"), 1, 1, "Title")
+        self.assertTrue(opts["noplaylist"])
+        self.assertNotIn("playlist_items", opts)
 
     def test_subtitles_only_skips_download_and_omits_format(self):
         d = _make_downloader(cls=Downloader, subtitle_langs=["en"], subtitles_only=True)

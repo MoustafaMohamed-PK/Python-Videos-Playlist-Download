@@ -123,6 +123,31 @@ class RunPlan:
     thumbnail: Optional[str] = None
     subtitle_langs: List[str] = field(default_factory=list)
     subtitles_only: bool = False
+    # Aligned with video_urls; see playlist_positions().
+    playlist_positions: Optional[List[Optional[int]]] = None
+
+
+def playlist_positions(
+    playlist_url: str, video_urls: List[Optional[str]]
+) -> Optional[List[Optional[int]]]:
+    """Which entries have to be selected by position rather than by URL.
+
+    Most playlists give every entry its own URL. Some sites put several
+    videos behind a single URL -- an Instagram carousel post is the
+    common case: each entry has a distinct id but reports the *post's*
+    URL as its own. Downloading that URL once per entry just fetches
+    whichever video the post leads with, over and over, so those
+    entries are downloaded by their position in the post instead (see
+    ``playlist_position`` in :meth:`app.downloader.Downloader.download_one`).
+
+    Returns ``None`` when every entry has a usable URL of its own, so
+    the ordinary path stays untouched.
+    """
+    positions: List[Optional[int]] = [
+        index if url == playlist_url else None
+        for index, url in enumerate(video_urls, start=1)
+    ]
+    return positions if any(p is not None for p in positions) else None
 
 
 def _ladder_menu() -> List[QualityOption]:
@@ -270,6 +295,11 @@ def plan(request: DownloadRequest, analysis: AnalyzeResult) -> RunPlan:
         existing_file_behavior=request.existing_file_behavior,
         prefer_mp4=prefer_mp4,
         video_urls=analysis.video_urls,
+        playlist_positions=(
+            playlist_positions(analysis.url, analysis.video_urls)
+            if analysis.is_playlist
+            else None
+        ),
         metadatas=metadatas,
         title=analysis.title,
         is_playlist=analysis.is_playlist,
@@ -306,5 +336,8 @@ def execute(
         subtitles_only=run_plan.subtitles_only,
     )
     return downloader.download_many(
-        run_plan.video_urls, run_plan.metadatas, concurrency=run_plan.concurrency
+        run_plan.video_urls,
+        run_plan.metadatas,
+        concurrency=run_plan.concurrency,
+        playlist_positions=run_plan.playlist_positions,
     )

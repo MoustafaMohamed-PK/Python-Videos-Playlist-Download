@@ -480,6 +480,7 @@ class Downloader:
         video_total: int,
         title: str,
         subtitle_langs: Optional[List[str]] = None,
+        playlist_position: Optional[int] = None,
     ) -> Dict[str, Any]:
         # Accepts an explicit override (rather than always reading
         # self.subtitle_langs) so download_one's per-item retry loop can
@@ -502,6 +503,16 @@ class Downloader:
             "noplaylist": True,  # we drive playlist iteration ourselves
             "concurrent_fragment_downloads": self.concurrent_fragments,
         }
+
+        if playlist_position is not None:
+            # This item has no URL of its own -- it's the Nth video
+            # inside a single page (an Instagram carousel post, say),
+            # so it can only be selected by position. "noplaylist"
+            # would defeat that: it tells yt-dlp to ignore the other
+            # videos on the page and take the first one, which is how
+            # every item of such a post ended up being the same video.
+            opts["noplaylist"] = False
+            opts["playlist_items"] = str(playlist_position)
 
         postprocessors: List[Dict[str, Any]] = []
 
@@ -565,9 +576,19 @@ class Downloader:
         return opts
 
     def download_one(
-        self, url: Optional[str], index: int, video_total: int, metadata: Dict[str, Any]
+        self,
+        url: Optional[str],
+        index: int,
+        video_total: int,
+        metadata: Dict[str, Any],
+        playlist_position: Optional[int] = None,
     ) -> VideoResult:
-        """Download a single video (by URL) to its computed target path."""
+        """Download a single video (by URL) to its computed target path.
+
+        ``playlist_position`` selects the Nth video of ``url`` instead of
+        whatever the page leads with -- for sites that put several
+        videos behind one URL (see :func:`app.service.playlist_positions`).
+        """
         title = metadata.get("title") or "Untitled"
 
         if not url:
@@ -629,7 +650,12 @@ class Downloader:
 
         while True:
             ydl_opts = self._build_ydl_opts(
-                stem_path, index, video_total, title, subtitle_langs=remaining_subtitle_langs
+                stem_path,
+                index,
+                video_total,
+                title,
+                subtitle_langs=remaining_subtitle_langs,
+                playlist_position=playlist_position,
             )
             ydl_opts["post_hooks"] = [lambda path: captured_paths.append(Path(path))]
             try:
@@ -703,6 +729,7 @@ class Downloader:
         metadatas: List[Dict[str, Any]],
         stop_on_first_failure: bool = False,
         concurrency: int = 1,
+        playlist_positions: Optional[List[Optional[int]]] = None,
     ) -> DownloadRunResult:
         """Download a sequence of videos (used for playlists).
 
@@ -711,6 +738,10 @@ class Downloader:
         ``cancel_event`` if one was provided, so an already-downloading
         item's progress hook can stop it rather than just preventing new
         ones from starting).
+
+        ``playlist_positions`` (aligned with ``video_urls``, ``None``
+        where unused) selects items by position for sites that give
+        every entry the same URL -- see :func:`app.service.playlist_positions`.
 
         ``concurrency == 1`` (the default) downloads strictly in order,
         exactly as before -- deterministic and gentle on sites that
@@ -724,6 +755,7 @@ class Downloader:
         """
         total = len(video_urls)
         run_result = DownloadRunResult(destination=self.destination)
+        positions: List[Optional[int]] = list(playlist_positions or []) + [None] * total
 
         def record(result: VideoResult) -> None:
             if result.skipped:
@@ -739,7 +771,7 @@ class Downloader:
             for i, (url, meta) in enumerate(zip(video_urls, metadatas), start=1):
                 if self.cancel_event is not None and self.cancel_event.is_set():
                     break
-                result = self.download_one(url, i, total, meta)
+                result = self.download_one(url, i, total, meta, positions[i - 1])
                 run_result.results.append(result)
                 record(result)
                 if not result.success and not result.skipped and stop_on_first_failure:
@@ -752,7 +784,7 @@ class Downloader:
             for i, (url, meta) in enumerate(zip(video_urls, metadatas), start=1):
                 if self.cancel_event is not None and self.cancel_event.is_set():
                     break
-                futures[executor.submit(self.download_one, url, i, total, meta)] = i
+                futures[executor.submit(self.download_one, url, i, total, meta, positions[i - 1])] = i
 
             for future in as_completed(futures):
                 result = future.result()

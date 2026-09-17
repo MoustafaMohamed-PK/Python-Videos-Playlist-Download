@@ -208,6 +208,50 @@ class TestPlan(unittest.TestCase):
         self.assertFalse(run_plan.subtitles_only)
         self.assertEqual(run_plan.subtitle_langs, ["en", "es"])
 
+    def test_entries_sharing_the_playlist_url_are_downloaded_by_position(self):
+        # An Instagram-carousel-shaped playlist: distinct videos, but
+        # every entry reports the post's own URL. Downloading that URL
+        # per entry would fetch the same video each time, so plan() must
+        # mark them for position-based selection instead.
+        target = _playlist_target([{"webpage_url": PLAYLIST_URL} for _ in range(3)])
+        analysis = analyze(PLAYLIST_URL, extractor=FakeExtractor(target))
+        request = DownloadRequest(
+            quality_label="best",
+            destination=Path("/tmp/whatever"),
+            filename_mode="numbered",
+            filename_pattern=None,
+        )
+        run_plan = plan(request, analysis)
+        self.assertEqual(run_plan.playlist_positions, [1, 2, 3])
+
+    def test_entries_with_their_own_urls_need_no_positions(self):
+        target = _playlist_target(
+            [{"webpage_url": "https://example.com/1"}, {"webpage_url": "https://example.com/2"}]
+        )
+        analysis = analyze(PLAYLIST_URL, extractor=FakeExtractor(target))
+        request = DownloadRequest(
+            quality_label="best",
+            destination=Path("/tmp/whatever"),
+            filename_mode="numbered",
+            filename_pattern=None,
+        )
+        run_plan = plan(request, analysis)
+        self.assertIsNone(run_plan.playlist_positions)
+
+    def test_single_video_never_gets_positions(self):
+        analysis = analyze(
+            YOUTUBE_URL,
+            extractor=FakeExtractor(_single_video_target()),
+            formats_fetcher=fake_formats_fetcher(SAMPLE_FORMATS),
+        )
+        request = DownloadRequest(
+            quality_label="best",
+            destination=Path("/tmp/whatever"),
+            filename_mode="original",
+            filename_pattern=None,
+        )
+        self.assertIsNone(plan(request, analysis).playlist_positions)
+
     def test_playlist_quality_not_validated_upfront(self):
         # Playlists' per-item formats aren't known until download time,
         # so plan() must not reject a quality just because it isn't on
