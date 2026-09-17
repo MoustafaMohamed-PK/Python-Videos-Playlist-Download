@@ -28,6 +28,11 @@ browser UI — both share the exact same download engine.
 
 - Downloads a single video or an entire playlist from any site yt-dlp
   recognizes — run `yt-dlp --list-extractors` for the full list.
+- Accepts the links apps actually give you to share: Facebook
+  `share/` links, Instagram posts and reels, and TikTok links —
+  including TikTok Lite (`lite.tiktok.com`), short links, and links
+  carrying only a video id, which are rewritten into a form that
+  downloads.
 - Builds the quality menu from what the site *actually* offers (not a
   fixed YouTube-shaped list), so odd resolutions, audio-only sites, and
   single-format sites all work correctly.
@@ -695,8 +700,9 @@ See [CLI (non-interactive) usage](#cli-non-interactive-usage).
 
 ### Things to expect
 
-- **Slow first start:** the program takes a few seconds to launch,
-  because it unpacks itself into a temporary folder on every start.
+- **Startup pause:** the program unpacks itself into a temporary folder
+  on every start — about a second on Linux, a little longer on Windows
+  and on the very first run.
 - **Unsigned file warnings:** Windows SmartScreen or your browser may
   warn about the `.exe` on first use. It isn't code-signed.
 - **Antivirus:** some tools flag self-extracting Python programs. Add
@@ -933,13 +939,25 @@ tells you clearly and lists what **is** available — it never silently
 substitutes a different resolution.
 
 When the chosen quality requires separate video and audio streams,
-FFmpeg is used to mux them. On sites that offer H.264/AAC (most video
-sites, including YouTube), that combination is preferred over
-newer codecs like AV1/VP9 for playback compatibility with common video
-players, and merged into `.mp4`. On webm/vp9/opus-only sites, the app
-doesn't force an incompatible mp4 remux — it lets the container follow
-the codecs actually available. Audio-only downloads are extracted to
-`.mp3` regardless of source format.
+FFmpeg is used to mux them. H.264 video with AAC audio is preferred
+over newer codecs — AV1, VP9 and H.265/HEVC — and merged into `.mp4`,
+because many common players (Windows' built-in video app, older
+VLC/QuickTime builds, TVs, phone galleries) can't decode those newer
+ones: the file opens, the sound plays, and the picture stays black.
+
+Two sites need this handling most:
+
+- **Facebook** often has only AV1 in its separate video streams, while
+  its H.264 copy sits in a combined stream the app falls back to.
+- **TikTok** labels its codecs `h264`/`aac`, and its highest quality is
+  usually H.265, so the app takes the H.264 copy instead.
+
+The trade-off is deliberate: when the only higher resolution is in a
+codec your player may not show, the app picks the slightly lower one
+that plays everywhere. On webm/vp9/opus-only sites, it doesn't force an
+incompatible mp4 remux — the container follows the codecs actually
+available. Audio-only downloads are extracted to `.mp3` regardless of
+source format.
 
 ## Subtitles
 
@@ -988,8 +1006,10 @@ titles (Arabic, etc.) are preserved.
 ## Playlist downloads
 
 Playlists are detected automatically from the URL, on any supported
-site. The app shows the playlist title and video count, then downloads
-every video — in parallel if `--concurrency`/the web UI's concurrency
+site. A post holding several videos (an Instagram carousel, say) counts
+as one too: every entry reports the post's own URL, so the app selects
+each video by its position in the post instead. The app shows the
+playlist title and video count, then downloads every video — in parallel if `--concurrency`/the web UI's concurrency
 setting is above 1 — numbering sequentially if you've chosen numbered
 or pattern-based filenames. A failure on one playlist item does **not**
 stop the rest — the run finishes and reports downloaded/failed/skipped
@@ -1147,7 +1167,16 @@ this app is designed and hardened around:
   videos requiring sign-in can't be downloaded.
 - **"The selected quality is not available"** — pick one of the
   qualities listed in the error message; the app won't silently
-  substitute a different resolution.
+  substitute a different resolution. Note that a vertical video's
+  heights are its long side: a 1080x1920 reel is listed as `1920p`.
+- **"This TikTok post is unavailable"** — the post was deleted, is
+  private, or isn't available in your region. TikTok also refuses some
+  requests at random, which the app already retries a few times before
+  reporting this.
+- **The video plays as a black screen with sound** — the file is in a
+  codec your player can't decode (AV1, VP9 or H.265). Downloads made
+  with this version prefer H.264, so re-download the video; anything
+  saved with an older version stays as it was.
 - **Network/timeout errors** — check your internet connection and retry;
   transient failures don't require restarting the whole playlist.
 - **Permission denied writing files** — choose a destination folder your
