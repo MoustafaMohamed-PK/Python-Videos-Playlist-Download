@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -115,6 +116,15 @@ def classify_ytdlp_error(exc: Exception) -> DownloadAppError:
         )
     if "video unavailable" in message:
         return URLUnavailableError("This video is unavailable.")
+    if "[tiktok]" in message and (
+        "ip address is blocked" in message or "http error 403" in message
+    ):
+        # TikTok reports deleted, private and region-locked posts this
+        # way (and answers 403 for them), not as a network failure.
+        return URLUnavailableError(
+            "This TikTok post is unavailable. It may have been deleted, "
+            "made private, or be blocked in your region."
+        )
     if "this playlist does not exist" in message or "playlist does not exist" in message:
         return URLUnavailableError("This playlist does not exist or is unavailable.")
     if "unable to download webpage" in message or "urlopen error" in message or "name or service not known" in message:
@@ -215,6 +225,32 @@ ProgressCallback = Callable[[ProgressEvent], None]
 # Extraction (metadata only, no download)
 # --------------------------------------------------------------------------
 
+# TikTok's anti-bot layer intermittently answers the webpage request
+# with HTTP 403 -- the same video can fail and then succeed seconds
+# later (roughly half of requests in testing) -- so a 403 from the
+# TikTok extractor is retried a few times before being reported.
+_TIKTOK_RETRY_DELAYS = (1.0, 2.0, 3.0)
+
+
+def _is_transient_tiktok_block(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "[tiktok]" in message and "http error 403" in message
+
+
+def _extract_info(ydl_opts: Dict[str, Any], url: str) -> Optional[Dict[str, Any]]:
+    """``YoutubeDL.extract_info`` with the TikTok 403 retry applied."""
+    for delay in (*_TIKTOK_RETRY_DELAYS, None):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        except yt_dlp.utils.DownloadError as exc:
+            if delay is None or not _is_transient_tiktok_block(exc):
+                raise
+            logger.info("TikTok returned 403, retrying in %.0fs | url=%s", delay, url)
+            time.sleep(delay)
+    return None  # unreachable; keeps type checkers happy
+
+
 def extract_target(url: str, *, flat: bool = True) -> ExtractedTarget:
     """Fetch metadata for ``url`` without downloading anything.
 
@@ -235,8 +271,7 @@ def extract_target(url: str, *, flat: bool = True) -> ExtractedTarget:
         "logger": _SilentYtdlpLogger(),
     }
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        info = _extract_info(ydl_opts, url)
     except yt_dlp.utils.DownloadError as exc:
         raise classify_ytdlp_error(exc) from exc
     except Exception as exc:  # noqa: BLE001 - translate anything unexpected
@@ -310,8 +345,7 @@ def fetch_formats_for_video(url: str) -> List[Dict[str, Any]]:
         "logger": _SilentYtdlpLogger(),
     }
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        info = _extract_info(ydl_opts, url)
     except yt_dlp.utils.DownloadError as exc:
         raise classify_ytdlp_error(exc) from exc
     return (info or {}).get("formats") or []
@@ -591,6 +625,7 @@ class Downloader:
         remaining_subtitle_langs = list(self.subtitle_langs)
         skipped_subtitle_langs: List[str] = []
         attempts_left = len(remaining_subtitle_langs) + 1
+        tiktok_retry_delays = list(_TIKTOK_RETRY_DELAYS)
 
         while True:
             ydl_opts = self._build_ydl_opts(
@@ -605,6 +640,17 @@ class Downloader:
                 logger.info("Download cancelled | url=%s", url)
                 return VideoResult(index=index, title=title, success=False, error="Cancelled")
             except yt_dlp.utils.DownloadError as exc:
+                if tiktok_retry_delays and _is_transient_tiktok_block(exc):
+                    delay = tiktok_retry_delays.pop(0)
+                    logger.info("TikTok returned 403, retrying in %.0fs | url=%s", delay, url)
+                    cancelled = (
+                        self.cancel_event.wait(delay)
+                        if self.cancel_event is not None
+                        else time.sleep(delay)
+                    )
+                    if cancelled:
+                        return VideoResult(index=index, title=title, success=False, error="Cancelled")
+                    continue
                 attempts_left -= 1
                 match = _SUBTITLE_FETCH_ERROR_RE.search(str(exc))
                 failed_lang = match.group(1) if match else None

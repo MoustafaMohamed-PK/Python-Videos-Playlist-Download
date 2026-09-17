@@ -21,6 +21,7 @@ import threading
 from dataclasses import dataclass
 from typing import List, Optional
 
+from app.tiktok import normalize_tiktok_url
 from app.validators import ValidationError
 
 _SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
@@ -117,7 +118,8 @@ def validate_media_url(url: str, *, allow_generic: bool = True) -> str:
 
     Raises :class:`ValidationError` (or its subclass
     :class:`UnsupportedSiteError`) on failure; returns the stripped URL
-    on success.
+    on success -- normalized for TikTok (see :mod:`app.tiktok`), so
+    callers must use the returned URL rather than their input.
     """
     if not url or not url.strip():
         raise ValidationError("The URL cannot be empty.")
@@ -131,6 +133,10 @@ def validate_media_url(url: str, *, allow_generic: bool = True) -> str:
             "That does not look like a valid URL. It must start with "
             "http:// or https://."
         )
+
+    # Rewrites TikTok (incl. TikTok Lite) share-link shapes yt-dlp
+    # doesn't recognize; a no-op without network access for other sites.
+    url = normalize_tiktok_url(url)
 
     match = match_extractor(url)
     if not match.supported:

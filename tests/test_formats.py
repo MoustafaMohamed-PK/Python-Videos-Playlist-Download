@@ -71,6 +71,30 @@ class TestBuildFormatSelector(unittest.TestCase):
         selector = build_format_selector(QualityChoice(label="540p"))
         self.assertIn("540", selector)
 
+    def test_compatible_progressive_preferred_over_any_codec_merge(self):
+        # Facebook reels can offer only AV1 video-only DASH streams plus
+        # an H.264 progressive "hd" stream with unknown codec; the
+        # progressive tier must come before the any-codec merge or the
+        # AV1 merge wins and plays as a black screen.
+        for label in ("best", "720p"):
+            selector = build_format_selector(QualityChoice(label=label))
+            tiers = selector.split("/")
+            progressive = next(i for i, t in enumerate(tiers) if "vcodec!~=?" in t)
+            any_merge = next(
+                i for i, t in enumerate(tiers)
+                if t.startswith("bestvideo*") and "vcodec" not in t
+            )
+            self.assertLess(progressive, any_merge, label)
+
+    def test_tiktok_codec_names_and_hevc_handled(self):
+        # TikTok reports "h264"/"aac" (not "avc1"/"mp4a") and serves its
+        # top quality as HEVC ("bytevc1"), which many players can't show.
+        selector = build_format_selector(QualityChoice(label="best"))
+        self.assertIn("h264", selector)
+        self.assertIn("aac", selector)
+        self.assertIn("bytevc", selector)
+        self.assertIn("hev", selector)
+
 
 class TestQualityChoiceHeight(unittest.TestCase):
     def test_parses_height_from_any_label(self):

@@ -47,6 +47,17 @@ _HEIGHT_BY_LABEL = {
 
 _HEIGHT_LABEL_RE = re.compile(r"^(\d+)p$")
 
+# H.264 video + AAC audio, under either naming: YouTube/Facebook report
+# RFC 6381 codec strings ("avc1.64001F", "mp4a.40.2"), TikTok reports
+# plain names ("h264", "aac").
+_H264_AAC_FILTERS = ("[vcodec~='^(avc1|h264)']", "[acodec~='^(mp4a|aac)']")
+
+# Excludes AV1/VP8/VP9 and H.265/HEVC video (TikTok's "bytevc1" is
+# HEVC), which many players can't decode -- they show a black screen
+# with sound. The "?" keeps formats whose vcodec is unknown -- e.g.
+# Facebook's progressive "hd"/"sd" H.264 streams.
+_COMPATIBLE_VCODEC_FILTER = "[vcodec!~=?'^(av0?1|vp0?[89]|hev|hvc|h265|bytevc)']"
+
 
 @dataclass
 class QualityChoice:
@@ -98,6 +109,15 @@ def build_format_selector(choice: QualityChoice) -> str:
     codec" only when the compatible pair isn't available keeps quality
     intact while defaulting to the combination that actually plays
     everywhere.
+
+    Sites like Facebook are a trickier case: their separate video-only
+    (DASH) streams can be AV1-only, while the H.264 video lives in a
+    progressive stream ("hd"/"sd") whose codec yt-dlp reports as
+    unknown. So before falling back to an any-codec merge, we try a
+    progressive stream that isn't known to be AV1/VP9/HEVC -- otherwise
+    the AV1 merge wins and plays as a black screen with sound. TikTok
+    is similar: its highest quality is often HEVC ("bytevc1"), with
+    H.264 only at a lower resolution.
     """
     if choice.is_audio_only:
         # Always transcoded to mp3 by the FFmpegExtractAudio postprocessor,
@@ -110,25 +130,25 @@ def build_format_selector(choice: QualityChoice) -> str:
     # nesting a "/" fallback inside one side of a "+" -- that would let
     # the parser peel it off into its own audio-only top-level
     # alternative and silently produce a video-less merge.
-    if choice.is_best:
-        return (
-            "bestvideo*[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
-            "bestvideo*+bestaudio/best"
-        )
-
+    h264, aac = _H264_AAC_FILTERS
     height = choice.height
-    if height is None:
-        # Defensive fallback; shouldn't happen given the fixed ladder.
+    if choice.is_best or height is None:
+        # height is None is a defensive fallback; shouldn't happen given
+        # the fixed ladder.
         return (
-            "bestvideo*[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+            f"bestvideo*{h264}+bestaudio{aac}/"
+            f"best{_COMPATIBLE_VCODEC_FILTER}/"
             "bestvideo*+bestaudio/best"
         )
 
     # Exact-height-or-below, preferring an H.264+AAC combo for maximum
-    # playback compatibility, then any codec combo of that size, then a
-    # single progressive stream, then an unrestricted best-effort merge.
+    # playback compatibility, then a compatible progressive stream (the
+    # "?" lets through streams with unknown height, like Facebook's
+    # "hd"), then any codec combo of that size, then a single
+    # progressive stream, then an unrestricted best-effort merge.
     return (
-        f"bestvideo*[vcodec^=avc1][height<={height}]+bestaudio[acodec^=mp4a]/"
+        f"bestvideo*{h264}[height<={height}]+bestaudio{aac}/"
+        f"best[height<=?{height}]{_COMPATIBLE_VCODEC_FILTER}/"
         f"bestvideo*[height<={height}]+bestaudio/"
         f"best[height<={height}]/"
         f"bestvideo*+bestaudio/best"
