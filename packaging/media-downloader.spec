@@ -28,6 +28,11 @@ ROOT = Path(SPECPATH).resolve().parent  # noqa: F821
 
 IS_WINDOWS = sys.platform.startswith("win")
 
+# Strip debug symbols from the bundled binaries (~10 MB on Linux, where
+# CI's Python ships an unstripped libpython). Not done on Windows:
+# PyInstaller warns that stripping there can produce broken executables.
+STRIP_SYMBOLS = not IS_WINDOWS
+
 # Static FFmpeg builds are downloaded by the build scripts into these
 # folders before PyInstaller runs -- see build.sh / build.ps1.
 FFMPEG_DIR = ROOT / "build" / ("ffmpeg-win" if IS_WINDOWS else "ffmpeg")
@@ -94,6 +99,7 @@ cli_exe = EXE(
     name="media-downloader-cli",
     console=True,
     upx=False,
+    strip=STRIP_SYMBOLS,
 )
 
 # ---------------------------------------------------------------- UI ----
@@ -121,4 +127,5 @@ ui_exe = EXE(
     name="media-downloader-ui",
     console=True,
     upx=False,
+    strip=STRIP_SYMBOLS,
 )

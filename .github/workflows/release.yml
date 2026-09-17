@@ -14,6 +14,13 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# One run per tag. Without this, two runs for the same tag both reach
+# the release step and race to upload the same asset names, which fails
+# the upload and can leave a release missing files.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
